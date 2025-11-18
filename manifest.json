@@ -5,7 +5,7 @@
   "description": "Plugin professionnel de supervision d’agents Wazo E-UC.",
   "version": "1.0.1",
   "plugin_format_version": "1",
-  "homepage": "https://github.com/Animehq/supervisor-plugi",
+  "homepage": "https://github.com/Animehq/supervisor-plugin",
   "staticTabs": [
     {
       "entityId": "supervisor_tab",
