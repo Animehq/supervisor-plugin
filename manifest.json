@@ -1,0 +1,19 @@
+{
+  "productType": "app",
+  "entityId": "wazo-supervisor-plugin",
+  "name": "Superviseur Agents",
+  "description": "Plugin professionnel de supervision d’agents Wazo E-UC.",
+  "version": "1.0.1",
+  "plugin_format_version": "1",
+  "homepage": "https://github.com/Animehq/supervisor-plugin",
+  "staticTabs": [
+    {
+      "entityId": "supervisor_tab",
+      "context": ["generalTab"],
+      "name": "Superviseur Agents",
+      "contentUrl": "./index.html",
+      "icon": "./icon.svg"
+    }
+  ],
+  "backgroundScript": "./app.js"
+}
