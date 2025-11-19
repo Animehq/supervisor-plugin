@@ -1,15 +1,28 @@
 {
+  "manifestVersion": "0.1",
+  "version": "1.0.0",
+  "id": "wazo-supervisor-plugin",
+  "packageName": "io.animehq.wazo-supervisor-plugin",
   "productType": "app",
-  "entityId": "wazo-supervisor-plugin",
-  "name": "Superviseur Agents",
-  "description": "Plugin professionnel de supervision d’agents Wazo E-UC.",
-  "version": "1.0.1",
-  "plugin_format_version": "1",
+  "name": {
+    "short": "Superviseur Agents",
+    "full": "Superviseur d’agents Wazo E-UC"
+  },
+  "developer": {
+    "name": "Animehq"
+  },
+  "description": {
+    "short": "Supervision temps réel des agents de centre d’appels.",
+    "full": "Plugin professionnel de supervision d’agents Wazo E-UC : état des agents, pause, login/logout des queues et actions de redirection d’appels."
+  },
+  "icons": {
+    "color": "icon.svg"
+  },
   "homepage": "https://github.com/Animehq/supervisor-plugin",
   "staticTabs": [
     {
       "entityId": "supervisor_tab",
-      "context": ["generalTab"],
+      "context": ["sidebarTab"],
       "name": "Superviseur Agents",
       "contentUrl": "index.html",
       "icon": "icon.svg"
@@ -17,5 +30,3 @@
   ],
   "backgroundScript": "app.js"
 }
-
-

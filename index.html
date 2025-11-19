@@ -1,14 +1,20 @@
+
 <!DOCTYPE html>
-<html>
+<html lang="fr">
 <head>
-  <meta charset="UTF-8">
+  <meta charset="UTF-8" />
   <title>Superviseur Agents</title>
-  <link rel="stylesheet" href="./style.css">
+  <link rel="stylesheet" href="./style.css" />
 </head>
 <body>
-  <h1>Supervision des Agents</h1>
+  <header class="header">
+    <h1 class="title">Supervision des Agents</h1>
+    <p class="subtitle">Wazo E-UC</p>
+  </header>
 
-  <div id="agents-container">
+  <section class="card">
+    <div id="status" class="status status--info">Plugin initialisé, chargement des agents…</div>
+
     <table id="agents-table">
       <thead>
         <tr>
@@ -18,9 +24,13 @@
           <th>Actions</th>
         </tr>
       </thead>
-      <tbody id="agents-body"></tbody>
+      <tbody id="agents-body">
+        <tr>
+          <td colspan="4" class="loading-row">Chargement des agents…</td>
+        </tr>
+      </tbody>
     </table>
-  </div>
+  </section>
 
   <script type="module" src="./app.js"></script>
 </body>
