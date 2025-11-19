@@ -1,151 +1,186 @@
-// app.js - Plugin "Superviseur Agents" pour Wazo E-UC
-// Version simple, suivant la doc E-UC Plugins SDK
+// app.js
+// ===================================================================
+// Superviseur Agents – utilisation correcte du E-UC Plugins SDK
+// - Import du SDK via CDN (ESM) comme tu l’avais déjà
+// - Initialisation App + récupération du contexte
+// - Appels API avec X-Auth-Token vers /api/agentd/1.0/agents
+// ===================================================================
 
-(function () {
-  const log = (...args) => console.log('[Superviseur]', ...args);
-  const showErrorBanner = (message) => {
-    const banner = document.getElementById('supervisor-error');
-    if (banner) {
-      banner.textContent = message;
-      banner.style.display = 'block';
-    }
-  };
+import { App } from 'https://cdn.jsdelivr.net/npm/@wazo/euc-plugins-sdk@latest/lib/esm/app.js';
 
-  const showLoading = (message) => {
-    const row = document.getElementById('supervisor-loading-row');
-    if (row) {
-      row.textContent = message || 'Chargement des agents...';
-      row.style.display = 'table-row';
-    }
-  };
+console.log('[Superviseur] Chargement du plugin…');
 
-  const hideLoading = () => {
-    const row = document.getElementById('supervisor-loading-row');
-    if (row) {
-      row.style.display = 'none';
-    }
-  };
+const app = new App();
 
-  const clearAgentsTable = () => {
-    const tbody = document.getElementById('supervisor-agents-body');
-    if (tbody) {
-      while (tbody.firstChild) {
-        tbody.removeChild(tbody.firstChild);
-      }
-    }
-  };
+// Réfs DOM
+const statusEl = document.getElementById('status');
+const tbodyEl = document.getElementById('agents-body');
 
-  const renderAgents = (agents) => {
-    clearAgentsTable();
+// Petit helper pour le bandeau de statut
+function setStatus(message, type = 'info') {
+  if (!statusEl) return;
+  statusEl.textContent = message || '';
+  statusEl.className = 'status';
+  statusEl.classList.add(`status--${type}`);
+}
 
-    const tbody = document.getElementById('supervisor-agents-body');
-    if (!tbody) {
-      log('Aucun <tbody id="supervisor-agents-body"> trouvé dans le HTML');
-      return;
-    }
+// Helpers table
+function showLoadingRow(message = 'Chargement des agents…') {
+  if (!tbodyEl) return;
+  tbodyEl.innerHTML = `
+    <tr>
+      <td colspan="4" class="loading-row">${message}</td>
+    </tr>
+  `;
+}
 
-    if (!agents || !agents.length) {
-      showLoading('Aucun agent trouvé.');
-      return;
-    }
+function showErrorRow(message) {
+  if (!tbodyEl) return;
+  tbodyEl.innerHTML = `
+    <tr>
+      <td colspan="4" class="error-row">${message}</td>
+    </tr>
+  `;
+}
 
-    agents.forEach((agent) => {
-      const tr = document.createElement('tr');
+// Création d’un client API basé sur le host + token du contexte
+function createApiClient(baseUrl, token) {
+  return async function callApi(path, options = {}) {
+    const url = `${baseUrl}${path}`;
 
-      const tdName = document.createElement('td');
-      tdName.textContent = agent.name || agent.username || agent.uuid || '—';
+    const headers = {
+      'Accept': 'application/json',
+      'Content-Type': 'application/json',
+      'X-Auth-Token': token,          // ✔ utilisation correcte du token
+      ...(options.headers || {}),
+    };
 
-      const tdState = document.createElement('td');
-      tdState.textContent = agent.state || agent.status || '—';
+    console.log('[Superviseur] Appel API', url, options.method || 'GET');
 
-      const tdPause = document.createElement('td');
-      tdPause.textContent = agent.paused ? 'En pause' : 'Disponible';
-
-      const tdActions = document.createElement('td');
-      tdActions.textContent = '—'; // on remplira plus tard (pause, redirection…)
-
-      tr.appendChild(tdName);
-      tr.appendChild(tdState);
-      tr.appendChild(tdPause);
-      tr.appendChild(tdActions);
-
-      tbody.appendChild(tr);
+    const res = await fetch(url, {
+      ...options,
+      headers,
     });
-  };
 
-  // --- Appel API agentd (correct suivant la doc) ------------------------
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      console.error('[Superviseur] Erreur API', res.status, url, text);
 
-  const fetchAgents = async ({ host, token, tenantUuid }) => {
-    try {
-      hideLoading();
-      showLoading('Chargement des agents…');
-
-      // host peut être "voice.adexgroup.fr" ou déjà une URL complète
-      const baseUrl = host.startsWith('http') ? host : `https://${host}`;
-
-      const response = await fetch(`${baseUrl}/api/agentd/1.0/agents`, {
-        method: 'GET',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Accept': 'application/json',
-          ...(tenantUuid ? { 'Wazo-Tenant': tenantUuid } : {}),
-        },
-      });
-
-      if (!response.ok) {
-        const text = await response.text().catch(() => '');
-        throw new Error(`API agentd ${response.status} ${response.statusText} – ${text}`);
+      if (res.status === 401 || res.status === 403) {
+        throw new Error(
+          `Accès refusé (${res.status}). Vérifiez les droits Call Center / Agents pour cet utilisateur.`
+        );
       }
 
-      const data = await response.json();
-      const items = data.items || data || [];
-      log('Agents reçus :', items);
-      hideLoading();
-      renderAgents(items);
-    } catch (error) {
-      console.error('[Superviseur] Erreur fetchAgents', error);
-      hideLoading();
-      showErrorBanner('Erreur lors du chargement des agents.');
+      throw new Error(`Erreur API ${res.status}: ${text || res.statusText}`);
+    }
+
+    if (res.status === 204) {
+      return null;
+    }
+
+    try {
+      return await res.json();
+    } catch {
+      return null;
     }
   };
+}
 
-  // --- Initialisation du plugin ----------------------------------------
+// Rendu des agents dans le tableau
+function renderAgents(agents) {
+  if (!tbodyEl) return;
 
-  const init = async () => {
-    try {
-      log('Chargement du plugin…');
+  if (!agents || agents.length === 0) {
+    tbodyEl.innerHTML = `
+      <tr>
+        <td colspan="4" class="empty-row">Aucun agent trouvé.</td>
+      </tr>
+    `;
+    return;
+  }
 
-      const sdk = window.WazoEUCPluginsSDK;
-      if (!sdk || !sdk.App) {
-        showErrorBanner('SDK Wazo E-UC introuvable dans la page.');
-        console.error('[Superviseur] window.WazoEUCPluginsSDK.App manquant');
-        return;
-      }
+  tbodyEl.innerHTML = '';
 
-      const app = new sdk.App();
+  agents.forEach((agent) => {
+    const tr = document.createElement('tr');
 
-      const context = await app.getContext();
-      log('Contexte reçu :', context);
+    const name =
+      agent.display_name ||
+      agent.name ||
+      agent.number ||
+      `Agent ${agent.id || ''}`;
 
-      const user = context.user || {};
-      const appInfo = context.app || {};
+    const status = agent.logged ? (agent.paused ? 'En pause' : 'Connecté') : 'Déconnecté';
+    const paused = agent.paused ? 'Oui' : 'Non';
 
-      const token = user.token;
-      const host = user.host || appInfo.host;
-      const tenantUuid = user.tenant_uuid || user.tenantUuid || appInfo.tenant_uuid;
+    tr.innerHTML = `
+      <td>${name}</td>
+      <td>${status}</td>
+      <td>${paused}</td>
+      <td>—</td>
+    `;
 
-      if (!token || !host) {
-        showErrorBanner('Host ou token manquant dans le contexte Wazo.');
-        console.error('[Superviseur] Contexte incomplet', { host, token, tenantUuid });
-        return;
-      }
+    tbodyEl.appendChild(tr);
+  });
+}
 
-      await fetchAgents({ host, token, tenantUuid });
-    } catch (error) {
-      console.error('[Superviseur] Erreur pendant init :', error);
-      showErrorBanner('Erreur lors de l’initialisation du plugin.');
+// Chargement de la liste des agents
+async function loadAgents(api) {
+  try {
+    setStatus('Chargement des agents…', 'info');
+    showLoadingRow();
+
+    const data = await api('/api/agentd/1.0/agents', { method: 'GET' });
+
+    console.log('[Superviseur] Réponse /agents :', data);
+
+    // suivant la version de la stack : tableau direct, ou { items: [...] }, ou { agents: [...] }
+    const agents = Array.isArray(data)
+      ? data
+      : Array.isArray(data?.items)
+      ? data.items
+      : Array.isArray(data?.agents)
+      ? data.agents
+      : [];
+
+    renderAgents(agents);
+    setStatus('Agents chargés.', 'success');
+  } catch (err) {
+    console.error('[Superviseur] Erreur loadAgents :', err);
+    setStatus(err.message || 'Erreur lors de la récupération de la liste des agents.', 'error');
+    showErrorRow('Erreur lors du chargement des agents.');
+  }
+}
+
+// Initialisation du plugin
+(async () => {
+  try {
+    setStatus('Initialisation du plugin…', 'info');
+    showLoadingRow('Initialisation du plugin…');
+
+    await app.initialize();                // ✔ conforme à la doc E-UC
+    const context = app.getContext();      // ✔ contexte complet (user, host, token, tenant, …)
+    console.log('[Superviseur] Contexte reçu :', context);
+
+    // On utilise le host et le token utilisateur
+    const stackHost = context.user.host;   // ex: "voice.adexgroup.fr"
+    const token = context.user.token;
+
+    if (!stackHost || !token) {
+      throw new Error('Host ou token manquant dans le contexte Wazo.');
     }
-  };
 
-  document.addEventListener('DOMContentLoaded', init);
+    const baseUrl = `https://${stackHost}`;
+    console.log('[Superviseur] Stack host :', baseUrl);
+
+    const api = createApiClient(baseUrl, token);
+
+    // Appel réel vers agentd
+    await loadAgents(api);
+  } catch (err) {
+    console.error('[Superviseur] Erreur init :', err);
+    setStatus(err.message || 'Erreur durant l’initialisation du plugin.', 'error');
+    showErrorRow('Erreur lors du chargement des agents.');
+  }
 })();
