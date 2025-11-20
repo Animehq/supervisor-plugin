@@ -1,1 +1,1 @@
-# supervisor-plugin
+# supervisor-plugin WAZO
