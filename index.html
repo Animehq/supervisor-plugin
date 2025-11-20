@@ -1,37 +1,28 @@
-
 <!DOCTYPE html>
 <html lang="fr">
-<head>
-  <meta charset="UTF-8" />
-  <title>Superviseur Agents</title>
-  <link rel="stylesheet" href="./style.css" />
-</head>
-<body>
-  <header class="header">
-    <h1 class="title">Supervision des Agents</h1>
-    <p class="subtitle">Wazo E-UC</p>
-  </header>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Supervision des Agents</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div class="page">
+      <header class="page-header">
+        <div class="page-header-left">
+          <h1>Supervision des Agents</h1>
+          <p class="page-subtitle">Wazo E-UC</p>
+        </div>
+        <div id="status" class="status status--info">
+          Initialisation du plugin…
+        </div>
+      </header>
 
-  <section class="card">
-    <div id="status" class="status status--info">Plugin initialisé, chargement des agents…</div>
+      <!-- Conteneur dans lequel on injecte les 3 tableaux -->
+      <main id="queues-container" class="queues-container">
+        <!-- Rempli côté JavaScript -->
+      </main>
+    </div>
 
-    <table id="agents-table">
-      <thead>
-        <tr>
-          <th>Nom</th>
-          <th>État</th>
-          <th>Pause</th>
-          <th>Actions</th>
-        </tr>
-      </thead>
-      <tbody id="agents-body">
-        <tr>
-          <td colspan="4" class="loading-row">Chargement des agents…</td>
-        </tr>
-      </tbody>
-    </table>
-  </section>
-
-  <script type="module" src="./app.js"></script>
-</body>
+    <script type="module" src="./app.js"></script>
+  </body>
 </html>
