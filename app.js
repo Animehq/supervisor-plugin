@@ -4,6 +4,7 @@
 // ===================================================================
 
 import { App } from 'https://cdn.jsdelivr.net/npm/@wazo/euc-plugins-sdk@latest/lib/esm/app.js';
+const AGENT_LOGIN_CONTEXT = 'from-queue';
 
 // -------------------------------------------------------------------
 // Références DOM
@@ -61,7 +62,7 @@ function createApiClient(baseUrl, token) {
       opts = { ...opts, body: JSON.stringify(opts.body) };
     }
 
-    console.log('[Superviseur] Appel API', opts.method || 'GET', url);
+    console.log('[Superviseur] Appel API', opts.method || 'GET', url, opts);
 
     const res = await fetch(url, {
       ...opts,
@@ -162,6 +163,8 @@ function buildAgentsMaps(agentsRaw) {
       id,
       uuid,
       extension,
+      number: agent.number || null,
+      context: agent.context || null,
       logged: !!agent.logged,
       paused: !!agent.paused,
       raw: agent,
@@ -279,6 +282,8 @@ function groupAgentsByQueue(queuesRaw, usersRaw, agentsRaw) {
       const row = {
         id: agentInfo?.id ?? null,
         extension: extension || agentInfo?.extension || null,
+        number: agentInfo?.number || null,
+        context: agentInfo?.context || null,
         name,
         logged: agentInfo?.logged ?? false,
         paused: agentInfo?.paused ?? false,
@@ -328,6 +333,67 @@ function createActionButton(label, variant = 'secondary') {
 // Rendu des files + actions
 // -------------------------------------------------------------------
 
+// Résout l'extension + context réels pour le login d'un agent
+// en interrogeant /api/confd/1.1/extensions
+async function resolveAgentLoginTarget(agent, api) {
+  // Si déjà résolu une fois, on réutilise
+  if (agent.loginExtension && agent.loginContext) {
+    return {
+      extension: agent.loginExtension,
+      context: agent.loginContext,
+    };
+  }
+
+  // On part de ce qu'on a : number ou extension
+  const guessExt = agent.extension || agent.number;
+  if (!guessExt) {
+    throw new Error(
+      `Impossible de déterminer l'extension pour l'agent ${agent.name} (id=${agent.id}).`
+    );
+  }
+
+  // On cherche cette extension dans la conf PBX
+  const query = `/api/confd/1.1/extensions?recurse=true&exten=${encodeURIComponent(
+    guessExt
+  )}`;
+
+  console.log('[Superviseur] Résolution context via confd:', query);
+  const result = await api(query, { method: 'GET' });
+
+  const items = (result && (result.items || result)) || [];
+  if (!items.length) {
+    throw new Error(
+      `Aucune extension '${guessExt}' trouvée dans confd pour l'agent ${agent.name} (id=${agent.id}).`
+    );
+  }
+
+  // On prend la première correspondance
+  const ext = items[0];
+  const extension = String(ext.exten);
+  const context = ext.context;
+
+  if (!context) {
+    throw new Error(
+      `Extension '${extension}' trouvée sans context dans confd pour l'agent ${agent.name} (id=${agent.id}).`
+    );
+  }
+
+  // On mémorise pour les prochains clics
+  agent.loginExtension = extension;
+  agent.loginContext = context;
+
+  console.log(
+    '[Superviseur] Context résolu:',
+    agent.name,
+    '→',
+    extension,
+    '@',
+    context
+  );
+
+  return { extension, context };
+}
+
 function renderQueues(groups, api) {
   clearContainer();
   if (!containerEl) return;
@@ -344,7 +410,7 @@ function renderQueues(groups, api) {
 
   const orderedKeys = Array.from(groups.keys())
     // on élimine éventuellement "Sans file d'attente"
-    .filter((name) => name !== "Sans file d'attente")
+    .filter((name) => name !== 'Sans file d\'attente')
     .sort((a, b) => {
       const score = (name) => (SUPPORT_IT_PATTERN.test(name) ? 0 : 1);
       const sa = score(a);
@@ -437,79 +503,110 @@ function renderQueues(groups, api) {
         agent.paused ? 'Reprendre' : 'Pause',
         'secondary'
       );
-      pauseBtn.disabled = !agent.logged;
+pauseBtn.addEventListener('click', async () => {
+  try {
+    pauseBtn.disabled = true;
 
-      pauseBtn.addEventListener('click', async () => {
-        try {
-          pauseBtn.disabled = true;
+    // On utilise le "number" (ou l’extension) de l’agent, pas l’id
+    const agentNumber = agent.number || agent.extension;
+    if (!agentNumber) {
+      throw new Error(
+        `Numéro d'agent introuvable pour ${agent.name} (id=${agent.id}).`
+      );
+    }
 
-          const path = agent.paused
-            ? `/api/agentd/1.0/agents/${agent.id}/resume`
-            : `/api/agentd/1.0/agents/${agent.id}/pause`;
+    const basePath = `/api/agentd/1.0/agents/by-number/${agentNumber}`;
+    const path = agent.paused
+      ? `${basePath}/unpause`   // conforme à la doc
+      : `${basePath}/pause`;
 
-          console.log('[Superviseur] PAUSE/RESUME', path, agent);
-          await api(path, { method: 'POST' });
+    const options = { method: 'POST' };
 
-          agent.paused = !agent.paused;
+    // Pause: body facultatif pour la raison
+    if (!agent.paused) {
+      options.body = { reason: 'plugin-superviseur' }; // optionnel
+    }
 
-          const newStatus = getStatusInfo(agent);
-          const newPause = getPauseInfo(agent);
-          statusTd.innerHTML = `<span class="pill ${newStatus.css}">${newStatus.text}</span>`;
-          pauseTd.innerHTML = `<span class="pill ${newPause.css}">${newPause.text}</span>`;
+    console.log('[Superviseur] PAUSE/UNPAUSE', path, options, agent);
+    await api(path, options);
 
-          pauseBtn.textContent = agent.paused ? 'Reprendre' : 'Pause';
-        } catch (err) {
-          console.error('[Superviseur] Erreur pause/reprendre', err);
-          alert(
-            'Erreur lors du changement de pause de cet agent.\n' +
-              (err.message || '')
-          );
-        } finally {
-          pauseBtn.disabled = !agent.logged;
-        }
-      });
+    agent.paused = !agent.paused;
 
-      // Bouton Login / Logout
+    const newStatus = getStatusInfo(agent);
+    const newPause = getPauseInfo(agent);
+    statusTd.innerHTML = `<span class="pill ${newStatus.css}">${newStatus.text}</span>`;
+    pauseTd.innerHTML = `<span class="pill ${newPause.css}">${newPause.text}</span>`;
+
+    pauseBtn.textContent = agent.paused ? 'Reprendre' : 'Pause';
+  } catch (err) {
+    console.error('[Superviseur] Erreur pause/reprendre', err);
+    alert(
+      'Erreur lors du changement de pause de cet agent.\n' +
+        (err.message || '')
+    );
+  } finally {
+    pauseBtn.disabled = !agent.logged;
+  }
+});
+
+      // Bouton Login / Logout (login/logoff by-id avec body extension/context)
       const loginBtn = createActionButton(
         agent.logged ? 'Logout' : 'Login',
         agent.logged ? 'danger' : 'primary'
       );
       loginBtn.classList.add(agent.logged ? 'btn-logout' : 'btn-login');
 
-      loginBtn.addEventListener('click', async () => {
-        try {
-          loginBtn.disabled = true;
+loginBtn.addEventListener('click', async () => {
+  try {
+    loginBtn.disabled = true;
 
-          const path = agent.logged
-            ? `/api/agentd/1.0/agents/${agent.id}/logout`
-            : `/api/agentd/1.0/agents/${agent.id}/login`;
+    const basePath = `/api/agentd/1.0/agents/by-id/${agent.id}`;
+    const isLoggingIn = !agent.logged;
 
-          console.log('[Superviseur] LOGIN/LOGOUT', path, agent);
-          await api(path, { method: 'POST' });
+    const path = isLoggingIn
+      ? `${basePath}/login`
+      : `${basePath}/logoff`;
 
-          agent.logged = !agent.logged;
-          if (!agent.logged) agent.paused = false;
+    const options = { method: 'POST' };
 
-          const newStatus = getStatusInfo(agent);
-          const newPause = getPauseInfo(agent);
-          statusTd.innerHTML = `<span class="pill ${newStatus.css}">${newStatus.text}</span>`;
-          pauseTd.innerHTML = `<span class="pill ${newPause.css}">${newPause.text}</span>`;
+    if (isLoggingIn) {
+      // 🔍 On demande à confd le vrai couple extension + context
+      const { extension, context } = await resolveAgentLoginTarget(agent, api);
 
-          pauseBtn.disabled = !agent.logged;
-          loginBtn.textContent = agent.logged ? 'Logout' : 'Login';
-          loginBtn.classList.toggle('btn-logout', agent.logged);
-          loginBtn.classList.toggle('btn-login', !agent.logged);
-        } catch (err) {
-          console.error('[Superviseur] Erreur login/logout', err);
-          alert(
-            'Erreur lors du login/logout de cet agent.\n' +
-              (err.message || '')
-          );
-        } finally {
-          loginBtn.disabled = false;
-        }
-      });
+      options.body = {
+        extension,
+        context,
+      };
+    }
 
+    console.log('[Superviseur] LOGIN/LOGOFF', path, options, agent);
+    await api(path, options);
+
+    // Mise à jour de l’état local
+    agent.logged = !agent.logged;
+    if (!agent.logged) {
+      agent.paused = false;
+    }
+
+    const newStatus = getStatusInfo(agent);
+    const newPause = getPauseInfo(agent);
+    statusTd.innerHTML = `<span class="pill ${newStatus.css}">${newStatus.text}</span>`;
+    pauseTd.innerHTML = `<span class="pill ${newPause.css}">${newPause.text}</span>`;
+
+    pauseBtn.disabled = !agent.logged;
+    loginBtn.textContent = agent.logged ? 'Logout' : 'Login';
+    loginBtn.classList.toggle('btn-logout', agent.logged);
+    loginBtn.classList.toggle('btn-login', !agent.logged);
+  } catch (err) {
+    console.error('[Superviseur] Erreur login/logout', err);
+    alert(
+      'Erreur lors du login/logout de cet agent.\n' +
+        (err.message || '')
+    );
+  } finally {
+    loginBtn.disabled = false;
+  }
+});
       actionsCell.appendChild(pauseBtn);
       actionsCell.appendChild(loginBtn);
       tbody.appendChild(tr);
