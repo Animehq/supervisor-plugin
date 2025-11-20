@@ -1,17 +1,30 @@
 // app.js
 // ===================================================================
-// Superviseur Agents – affichage par files d’attente + actions
+// Superviseur Agents Wazo – temps réel + actions + drag & drop
 // ===================================================================
 
 import { App } from 'https://cdn.jsdelivr.net/npm/@wazo/euc-plugins-sdk@latest/lib/esm/app.js';
-const AGENT_LOGIN_CONTEXT = 'from-queue';
 
 // -------------------------------------------------------------------
-// Références DOM
+// État global
 // -------------------------------------------------------------------
 
 const statusEl = document.getElementById('status');
 const containerEl = document.getElementById('queues-container');
+
+const state = {
+  api: null,
+  baseUrl: null,
+  token: null,
+  groups: new Map(),       // queueName -> rows[]
+  queuesMeta: new Map(),   // queueName -> { id, raw }
+  websocket: null,
+  realtimeReloadScheduled: false,
+};
+
+// -------------------------------------------------------------------
+// Helpers UI
+// -------------------------------------------------------------------
 
 function setStatus(message, type = 'info') {
   if (!statusEl) {
@@ -35,9 +48,44 @@ function renderEmptyState(message) {
   clearContainer();
   if (!containerEl) return;
   const div = document.createElement('div');
-  div.className = 'empty-state';
+  div.className = 'empty-state text-slate-500 text-sm';
   div.textContent = message;
   containerEl.appendChild(div);
+}
+
+function createActionButton(label, variant = 'secondary') {
+  const baseClasses =
+    'btn btn--sm inline-flex items-center gap-1 rounded-md text-xs font-medium px-2.5 py-1 transition';
+  let variantClasses =
+    'btn--secondary border border-slate-300 bg-white text-slate-700 hover:bg-slate-50';
+
+  if (variant === 'primary') {
+    variantClasses =
+      'btn--primary bg-blue-600 text-white hover:bg-blue-700 border border-blue-600';
+  } else if (variant === 'danger') {
+    variantClasses =
+      'btn--danger bg-rose-600 text-white hover:bg-rose-700 border border-rose-600';
+  }
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = `${baseClasses} ${variantClasses}`;
+  btn.textContent = label;
+  return btn;
+}
+
+// Style spécifique pour le bouton Login/Logout
+function setLoginButtonStyle(btn, isLogged) {
+  const baseClasses =
+    'btn btn--sm inline-flex items-center gap-1 rounded-md text-xs font-medium px-2.5 py-1 transition';
+
+  const variantClasses = isLogged
+    ? 'btn--danger bg-rose-600 text-white hover:bg-rose-700 border border-rose-600'
+    : 'btn--primary bg-blue-600 text-white hover:bg-blue-700 border border-blue-600';
+
+  const extra = isLogged ? 'btn-logout' : 'btn-login';
+
+  btn.className = `${baseClasses} ${variantClasses} ${extra}`;
 }
 
 // -------------------------------------------------------------------
@@ -56,7 +104,6 @@ function createApiClient(baseUrl, token) {
       ...(opts.headers || {}),
     };
 
-    // Si on envoie un body (JSON), on le sérialise et on ajoute le Content-Type
     if (opts.body && typeof opts.body !== 'string') {
       headers['Content-Type'] = 'application/json';
       opts = { ...opts, body: JSON.stringify(opts.body) };
@@ -93,7 +140,7 @@ function createApiClient(baseUrl, token) {
 }
 
 // -------------------------------------------------------------------
-// Helpers de normalisation / mapping
+// Normalisation / mapping
 // -------------------------------------------------------------------
 
 function normalizeCollection(raw) {
@@ -163,8 +210,7 @@ function buildAgentsMaps(agentsRaw) {
       id,
       uuid,
       extension,
-      number: agent.number || null,
-      context: agent.context || null,
+      number: agent.number || extension,
       logged: !!agent.logged,
       paused: !!agent.paused,
       raw: agent,
@@ -179,13 +225,68 @@ function buildAgentsMaps(agentsRaw) {
   return { agents, byExt, byId, byUuid };
 }
 
-// queues → regroupement agents par file d’attente
+// Résout extension + context réels pour login via confd
+async function resolveAgentLoginTarget(agent, api) {
+  if (agent.loginExtension && agent.loginContext) {
+    return {
+      extension: agent.loginExtension,
+      context: agent.loginContext,
+    };
+  }
+
+  const guessExt = agent.extension || agent.number;
+  if (!guessExt) {
+    throw new Error(
+      `Impossible de déterminer l'extension pour l'agent ${agent.name} (id=${agent.id}).`
+    );
+  }
+
+  const query = `/api/confd/1.1/extensions?recurse=true&exten=${encodeURIComponent(
+    guessExt
+  )}`;
+  console.log('[Superviseur] Résolution context via confd:', query);
+
+  const result = await api(query, { method: 'GET' });
+  const items = (result && (result.items || result)) || [];
+  if (!items.length) {
+    throw new Error(
+      `Aucune extension '${guessExt}' trouvée dans confd pour l'agent ${agent.name} (id=${agent.id}).`
+    );
+  }
+
+  const ext = items[0];
+  const extension = String(ext.exten);
+  const context = ext.context;
+
+  if (!context) {
+    throw new Error(
+      `Extension '${extension}' trouvée sans context dans confd pour l'agent ${agent.name} (id=${agent.id}).`
+    );
+  }
+
+  agent.loginExtension = extension;
+  agent.loginContext = context;
+
+  console.log(
+    '[Superviseur] Context résolu:',
+    agent.name,
+    '→',
+    extension,
+    '@',
+    context
+  );
+
+  return { extension, context };
+}
+
+// queues → regroupement agents par file d’attente + meta queue
 function groupAgentsByQueue(queuesRaw, usersRaw, agentsRaw) {
   const queues = normalizeCollection(queuesRaw);
   const usersByUuid = buildUsersByUuidMap(usersRaw);
   const { byExt, byId, byUuid } = buildAgentsMaps(agentsRaw);
 
-  const groups = new Map();
+  const groups = new Map();     // queueName -> rows[]
+  const queuesMeta = new Map(); // queueName -> { id, raw }
 
   const ensureGroup = (label) => {
     if (!groups.has(label)) groups.set(label, []);
@@ -195,6 +296,10 @@ function groupAgentsByQueue(queuesRaw, usersRaw, agentsRaw) {
   queues.forEach((queue) => {
     const queueLabel =
       queue.display_name || queue.label || queue.name || 'File d’attente';
+    const queueId = queue.queue_id ?? queue.id;
+
+    queuesMeta.set(queueLabel, { id: queueId, raw: queue });
+
     const members = queue.members || {};
     const qGroup = ensureGroup(queueLabel);
 
@@ -245,7 +350,6 @@ function groupAgentsByQueue(queuesRaw, usersRaw, agentsRaw) {
         } else {
           extension = agentInfo.extension || null;
 
-          // On essaie de retrouver le user correspondant à l’extension pour le nom
           if (extension) {
             for (const [, uInfo] of usersByUuid) {
               if (
@@ -260,7 +364,6 @@ function groupAgentsByQueue(queuesRaw, usersRaw, agentsRaw) {
         }
       }
 
-      // Fallback par numéro brut
       if (!agentInfo && !extension && ref.number) {
         extension = String(ref.number);
         agentInfo = byExt.get(extension) || null;
@@ -283,118 +386,109 @@ function groupAgentsByQueue(queuesRaw, usersRaw, agentsRaw) {
         id: agentInfo?.id ?? null,
         extension: extension || agentInfo?.extension || null,
         number: agentInfo?.number || null,
-        context: agentInfo?.context || null,
         name,
         logged: agentInfo?.logged ?? false,
         paused: agentInfo?.paused ?? false,
+        queueId,
+        queueLabel,
       };
 
       qGroup.push(row);
     });
   });
 
-  console.log('[Superviseur] Groupes construits', groups);
-  return groups;
+  console.log('[Superviseur] Groupes construits', groups, queuesMeta);
+  return { groups, queuesMeta };
 }
 
 // -------------------------------------------------------------------
-// Helpers UI (statuts, boutons…)
+// Statuts / stats
 // -------------------------------------------------------------------
 
 function getStatusInfo(agent) {
   if (!agent.logged) {
-    return { text: 'Déconnecté', css: 'pill--offline' };
+    return { text: 'Déconnecté', css: 'pill--offline bg-slate-100 text-slate-500' };
   }
   if (agent.paused) {
-    return { text: 'En pause', css: 'pill--paused' };
+    return { text: 'En pause', css: 'pill--paused bg-amber-100 text-amber-700' };
   }
-  return { text: 'Connecté', css: 'pill--online' };
+  return { text: 'Connecté', css: 'pill--online bg-emerald-100 text-emerald-700' };
 }
 
 function getPauseInfo(agent) {
   if (!agent.logged) {
-    return { text: '—', css: 'pill--pause-no' };
+    return { text: '—', css: 'pill--pause-no bg-slate-50 text-slate-400' };
   }
   if (agent.paused) {
-    return { text: 'Oui', css: 'pill--pause-yes' };
+    return { text: 'Oui', css: 'pill--pause-yes bg-amber-100 text-amber-700' };
   }
-  return { text: 'Non', css: 'pill--pause-no' };
+  return { text: 'Non', css: 'pill--pause-no bg-emerald-50 text-emerald-600' };
 }
 
-function createActionButton(label, variant = 'secondary') {
-  const btn = document.createElement('button');
-  btn.type = 'button';
-  btn.className = `btn btn--${variant} btn--sm`;
-  btn.textContent = label;
-  return btn;
+function computeQueueStats(rows) {
+  let total = rows.length;
+  let logged = 0;
+  let paused = 0;
+
+  rows.forEach((a) => {
+    if (a.logged) {
+      logged += 1;
+      if (a.paused) paused += 1;
+    }
+  });
+
+  const offline = total - logged;
+
+  return {
+    totalAgents: total,
+    logged,
+    paused,
+    offline,
+    waiting: '—', // à câbler sur calld/queue stats si tu veux aller plus loin
+    inCall: '—',
+    sla: '—',
+  };
+}
+
+// -------------------------------------------------------------------
+// Drag & Drop – déplacement d’un agent entre files
+// -------------------------------------------------------------------
+
+async function moveAgentBetweenQueues(agentId, fromQueueId, toQueueId, api) {
+  if (!agentId || !fromQueueId || !toQueueId || fromQueueId === toQueueId) {
+    return;
+  }
+
+  try {
+    setStatus('Déplacement de l’agent…', 'info');
+
+    await api(`/api/agentd/1.0/agents/by-id/${agentId}/remove`, {
+      method: 'POST',
+      body: { queue_id: fromQueueId },
+    });
+
+    await api(`/api/agentd/1.0/agents/by-id/${agentId}/add`, {
+      method: 'POST',
+      body: { queue_id: toQueueId },
+    });
+
+    await loadData(api);
+    setStatus('Agent déplacé.', 'success');
+  } catch (err) {
+    console.error('[Superviseur] Erreur moveAgentBetweenQueues', err);
+    alert(
+      'Erreur lors du déplacement de l’agent entre les files.\n' +
+        (err.message || '')
+    );
+    setStatus('Erreur lors du déplacement de l’agent.', 'error');
+  }
 }
 
 // -------------------------------------------------------------------
 // Rendu des files + actions
 // -------------------------------------------------------------------
 
-// Résout l'extension + context réels pour le login d'un agent
-// en interrogeant /api/confd/1.1/extensions
-async function resolveAgentLoginTarget(agent, api) {
-  // Si déjà résolu une fois, on réutilise
-  if (agent.loginExtension && agent.loginContext) {
-    return {
-      extension: agent.loginExtension,
-      context: agent.loginContext,
-    };
-  }
-
-  // On part de ce qu'on a : number ou extension
-  const guessExt = agent.extension || agent.number;
-  if (!guessExt) {
-    throw new Error(
-      `Impossible de déterminer l'extension pour l'agent ${agent.name} (id=${agent.id}).`
-    );
-  }
-
-  // On cherche cette extension dans la conf PBX
-  const query = `/api/confd/1.1/extensions?recurse=true&exten=${encodeURIComponent(
-    guessExt
-  )}`;
-
-  console.log('[Superviseur] Résolution context via confd:', query);
-  const result = await api(query, { method: 'GET' });
-
-  const items = (result && (result.items || result)) || [];
-  if (!items.length) {
-    throw new Error(
-      `Aucune extension '${guessExt}' trouvée dans confd pour l'agent ${agent.name} (id=${agent.id}).`
-    );
-  }
-
-  // On prend la première correspondance
-  const ext = items[0];
-  const extension = String(ext.exten);
-  const context = ext.context;
-
-  if (!context) {
-    throw new Error(
-      `Extension '${extension}' trouvée sans context dans confd pour l'agent ${agent.name} (id=${agent.id}).`
-    );
-  }
-
-  // On mémorise pour les prochains clics
-  agent.loginExtension = extension;
-  agent.loginContext = context;
-
-  console.log(
-    '[Superviseur] Context résolu:',
-    agent.name,
-    '→',
-    extension,
-    '@',
-    context
-  );
-
-  return { extension, context };
-}
-
-function renderQueues(groups, api) {
+function renderQueues(groups, api, queuesMeta) {
   clearContainer();
   if (!containerEl) return;
 
@@ -403,14 +497,13 @@ function renderQueues(groups, api) {
     return;
   }
 
-  // Ordre voulu :
-  //  1. "Support IT"
-  //  2. Les autres files triées alpha
+  containerEl.className =
+    'queues-container flex flex-col gap-4 xl:grid xl:grid-cols-2 2xl:grid-cols-3';
+
   const SUPPORT_IT_PATTERN = /support\s*it/i;
 
   const orderedKeys = Array.from(groups.keys())
-    // on élimine éventuellement "Sans file d'attente"
-    .filter((name) => name !== 'Sans file d\'attente')
+    .filter((name) => name !== "Sans file d'attente")
     .sort((a, b) => {
       const score = (name) => (SUPPORT_IT_PATTERN.test(name) ? 0 : 1);
       const sa = score(a);
@@ -420,7 +513,6 @@ function renderQueues(groups, api) {
     });
 
   orderedKeys.forEach((queueName) => {
-    // Tri alphabétique des agents par nom, puis extension
     const rows = [...(groups.get(queueName) || [])].sort((a, b) => {
       const nameA = (a.name || '').toLocaleLowerCase('fr-FR');
       const nameB = (b.name || '').toLocaleLowerCase('fr-FR');
@@ -434,35 +526,97 @@ function renderQueues(groups, api) {
       return nameA.localeCompare(nameB, 'fr', { sensitivity: 'base' });
     });
 
+    const queueMeta = queuesMeta.get(queueName) || {};
+    const queueId = queueMeta.id || null;
+    const stats = computeQueueStats(rows);
+
     const section = document.createElement('section');
-    section.className = 'queue-card';
+    section.className =
+      'queue-card bg-white rounded-2xl shadow-[0_18px_35px_rgba(15,23,42,0.07)] border border-slate-200/60 p-4 flex flex-col';
+    section.dataset.queueId = queueId || '';
 
     const header = document.createElement('header');
-    header.className = 'queue-card__header';
+    header.className =
+      'queue-card__header flex items-center justify-between gap-3 pb-2 border-b border-slate-200 mb-3';
+
     const title = document.createElement('h2');
     title.textContent = queueName;
+    title.className = 'text-sm font-semibold text-slate-900 flex items-center gap-2';
+
+    const meta = document.createElement('div');
+    meta.className = 'queue-card__meta flex items-center gap-2 text-[11px] text-slate-600';
+
+    const badgeAgents = document.createElement('span');
+    badgeAgents.className =
+      'badge badge--count bg-sky-50 text-sky-700 border border-sky-200 rounded-full px-2 py-0.5';
+    badgeAgents.textContent = `${stats.logged}/${stats.totalAgents} connectés`;
+
+    const badgePaused = document.createElement('span');
+    badgePaused.className =
+      'badge bg-amber-50 text-amber-700 border border-amber-200 rounded-full px-2 py-0.5';
+    badgePaused.textContent = `${stats.paused} en pause`;
+
+    const badgeOffline = document.createElement('span');
+    badgeOffline.className =
+      'badge bg-slate-50 text-slate-500 border border-slate-200 rounded-full px-2 py-0.5';
+    badgeOffline.textContent = `${stats.offline} off`;
+
+    meta.appendChild(badgeAgents);
+    meta.appendChild(badgePaused);
+    meta.appendChild(badgeOffline);
+
     header.appendChild(title);
+    header.appendChild(meta);
     section.appendChild(header);
 
     const body = document.createElement('div');
-    body.className = 'queue-card__body';
+    body.className = 'queue-card__body overflow-x-auto';
 
     const table = document.createElement('table');
-    table.className = 'agents-table';
+    table.className = 'agents-table w-full border-collapse text-xs';
+    table.dataset.queueId = queueId || '';
 
     const thead = document.createElement('thead');
     thead.innerHTML = `
-      <tr>
-        <th>NOM</th>
-        <th>EXTENSION</th>
-        <th>ÉTAT</th>
-        <th>PAUSE</th>
-        <th class="col-actions">ACTIONS</th>
+      <tr class="bg-slate-50">
+        <th class="px-2 py-1 text-left text-[11px] font-semibold text-slate-500">NOM</th>
+        <th class="px-2 py-1 text-left text-[11px] font-semibold text-slate-500">EXTENSION</th>
+        <th class="px-2 py-1 text-left text-[11px] font-semibold text-slate-500">ÉTAT</th>
+        <th class="px-2 py-1 text-left text-[11px] font-semibold text-slate-500">PAUSE</th>
+        <th class="px-2 py-1 text-left text-[11px] font-semibold text-slate-500">SUPERVISION</th>
+        <th class="px-2 py-1 text-left text-[11px] font-semibold text-slate-500 col-actions">ACTIONS</th>
       </tr>
     `;
     table.appendChild(thead);
 
     const tbody = document.createElement('tbody');
+
+    // Drag & drop – cible
+    table.addEventListener('dragover', (ev) => {
+      ev.preventDefault();
+      ev.dataTransfer.dropEffect = 'move';
+    });
+
+    table.addEventListener('drop', async (ev) => {
+      ev.preventDefault();
+      const queueIdTargetStr = table.dataset.queueId;
+      const queueIdTarget = queueIdTargetStr ? Number(queueIdTargetStr) : null;
+      if (!queueIdTarget) return;
+
+      try {
+        const data = ev.dataTransfer.getData('application/json');
+        if (!data) return;
+        const parsed = JSON.parse(data);
+        const agentId = parsed.agentId;
+        const fromQueueId = parsed.fromQueueId;
+
+        if (!agentId || !fromQueueId || fromQueueId === queueIdTarget) return;
+
+        await moveAgentBetweenQueues(agentId, fromQueueId, queueIdTarget, api);
+      } catch (err) {
+        console.error('[Superviseur] Erreur drop DnD', err);
+      }
+    });
 
     rows.forEach((agent) => {
       const tr = document.createElement('tr');
@@ -479,14 +633,36 @@ function renderQueues(groups, api) {
         <td class="col-pause">
           <span class="pill ${pauseInfo.css}">${pauseInfo.text}</span>
         </td>
+        <td class="col-supervision"></td>
         <td class="col-actions"></td>
       `;
 
-      const actionsCell = tr.querySelector('.col-actions');
       const statusTd = tr.querySelector('.col-status');
       const pauseTd = tr.querySelector('.col-pause');
+      const supervisionCell = tr.querySelector('.col-supervision');
+      const actionsCell = tr.querySelector('.col-actions');
 
-      // Si pas d'id agent (pas associé), on affiche les actions désactivées
+      // DnD – source
+      tr.dataset.agentId = agent.id || '';
+      tr.dataset.queueId = agent.queueId || '';
+
+      if (agent.id && agent.queueId) {
+        tr.draggable = true;
+        tr.classList.add('cursor-move', 'hover:bg-slate-50');
+
+        tr.addEventListener('dragstart', (ev) => {
+          ev.dataTransfer.effectAllowed = 'move';
+          ev.dataTransfer.setData(
+            'application/json',
+            JSON.stringify({
+              agentId: agent.id,
+              fromQueueId: agent.queueId,
+            })
+          );
+        });
+      }
+
+      // Si pas d'id agent (pas associé), actions désactivées
       if (!agent.id) {
         const pauseBtn = createActionButton('Pause', 'secondary');
         const loginBtn = createActionButton('Login', 'primary');
@@ -498,115 +674,141 @@ function renderQueues(groups, api) {
         return;
       }
 
-      // Bouton Pause / Reprendre
+      // -------------------------------------------------------------------
+      // SUPERVISION (Join / Spy / Whisper) – hooks à câbler sur calld
+      // -------------------------------------------------------------------
+      const joinBtn = createActionButton('Join', 'secondary');
+      const spyBtn = createActionButton('Spy', 'secondary');
+      const whisperBtn = createActionButton('Whisper', 'secondary');
+
+      joinBtn.addEventListener('click', () => {
+        console.warn('[Superviseur] TODO join() à câbler sur calld pour', agent);
+        alert("Join : à câbler sur l'API calld avec le call_id de l'agent.");
+      });
+
+      spyBtn.addEventListener('click', () => {
+        console.warn('[Superviseur] TODO spy() à câbler sur calld pour', agent);
+        alert("Spy : à câbler sur l'API calld pour écouter l'appel.");
+      });
+
+      whisperBtn.addEventListener('click', () => {
+        console.warn('[Superviseur] TODO whisper() à câbler sur calld pour', agent);
+        alert("Whisper : à câbler sur l'API calld pour chuchoter.");
+      });
+
+      supervisionCell.appendChild(joinBtn);
+      supervisionCell.appendChild(spyBtn);
+      supervisionCell.appendChild(whisperBtn);
+
+      // -------------------------------------------------------------------
+      // BOUTON PAUSE / REPRENDRE
+      // -------------------------------------------------------------------
       const pauseBtn = createActionButton(
         agent.paused ? 'Reprendre' : 'Pause',
         'secondary'
       );
-pauseBtn.addEventListener('click', async () => {
-  try {
-    pauseBtn.disabled = true;
+      pauseBtn.disabled = !agent.logged;
 
-    // On utilise le "number" (ou l’extension) de l’agent, pas l’id
-    const agentNumber = agent.number || agent.extension;
-    if (!agentNumber) {
-      throw new Error(
-        `Numéro d'agent introuvable pour ${agent.name} (id=${agent.id}).`
-      );
-    }
+      pauseBtn.addEventListener('click', async () => {
+        try {
+          pauseBtn.disabled = true;
 
-    const basePath = `/api/agentd/1.0/agents/by-number/${agentNumber}`;
-    const path = agent.paused
-      ? `${basePath}/unpause`   // conforme à la doc
-      : `${basePath}/pause`;
+          const agentNumber = agent.number || agent.extension;
+          if (!agentNumber) {
+            throw new Error(
+              `Numéro d'agent introuvable pour ${agent.name} (id=${agent.id}).`
+            );
+          }
 
-    const options = { method: 'POST' };
+          const basePath = `/api/agentd/1.0/agents/by-number/${agentNumber}`;
+          const path = agent.paused
+            ? `${basePath}/unpause`
+            : `${basePath}/pause`;
 
-    // Pause: body facultatif pour la raison
-    if (!agent.paused) {
-      options.body = { reason: 'plugin-superviseur' }; // optionnel
-    }
+          const options = { method: 'POST' };
 
-    console.log('[Superviseur] PAUSE/UNPAUSE', path, options, agent);
-    await api(path, options);
+          if (!agent.paused) {
+            options.body = { reason: 'plugin-superviseur' };
+          }
 
-    agent.paused = !agent.paused;
+          console.log('[Superviseur] PAUSE/UNPAUSE', path, options, agent);
+          await api(path, options);
 
-    const newStatus = getStatusInfo(agent);
-    const newPause = getPauseInfo(agent);
-    statusTd.innerHTML = `<span class="pill ${newStatus.css}">${newStatus.text}</span>`;
-    pauseTd.innerHTML = `<span class="pill ${newPause.css}">${newPause.text}</span>`;
+          agent.paused = !agent.paused;
 
-    pauseBtn.textContent = agent.paused ? 'Reprendre' : 'Pause';
-  } catch (err) {
-    console.error('[Superviseur] Erreur pause/reprendre', err);
-    alert(
-      'Erreur lors du changement de pause de cet agent.\n' +
-        (err.message || '')
-    );
-  } finally {
-    pauseBtn.disabled = !agent.logged;
-  }
-});
+          const newStatus = getStatusInfo(agent);
+          const newPause = getPauseInfo(agent);
+          statusTd.innerHTML = `<span class="pill ${newStatus.css}">${newStatus.text}</span>`;
+          pauseTd.innerHTML = `<span class="pill ${newPause.css}">${newPause.text}</span>`;
 
-      // Bouton Login / Logout (login/logoff by-id avec body extension/context)
-      const loginBtn = createActionButton(
-        agent.logged ? 'Logout' : 'Login',
-        agent.logged ? 'danger' : 'primary'
-      );
-      loginBtn.classList.add(agent.logged ? 'btn-logout' : 'btn-login');
+          pauseBtn.textContent = agent.paused ? 'Reprendre' : 'Pause';
+        } catch (err) {
+          console.error('[Superviseur] Erreur pause/reprendre', err);
+          alert(
+            'Erreur lors du changement de pause de cet agent.\n' +
+              (err.message || '')
+          );
+        } finally {
+          pauseBtn.disabled = !agent.logged;
+        }
+      });
 
-loginBtn.addEventListener('click', async () => {
-  try {
-    loginBtn.disabled = true;
+      // -------------------------------------------------------------------
+      // BOUTON LOGIN / LOGOUT (avec résolution context via confd)
+      // -------------------------------------------------------------------
+      const loginBtn = document.createElement('button');
+      loginBtn.type = 'button';
+      loginBtn.textContent = agent.logged ? 'Logout' : 'Login';
+      setLoginButtonStyle(loginBtn, agent.logged);
 
-    const basePath = `/api/agentd/1.0/agents/by-id/${agent.id}`;
-    const isLoggingIn = !agent.logged;
+      loginBtn.addEventListener('click', async () => {
+        try {
+          loginBtn.disabled = true;
 
-    const path = isLoggingIn
-      ? `${basePath}/login`
-      : `${basePath}/logoff`;
+          const basePath = `/api/agentd/1.0/agents/by-id/${agent.id}`;
+          const isLoggingIn = !agent.logged;
 
-    const options = { method: 'POST' };
+          const path = isLoggingIn
+            ? `${basePath}/login`
+            : `${basePath}/logoff`;
 
-    if (isLoggingIn) {
-      // 🔍 On demande à confd le vrai couple extension + context
-      const { extension, context } = await resolveAgentLoginTarget(agent, api);
+          const options = { method: 'POST' };
 
-      options.body = {
-        extension,
-        context,
-      };
-    }
+          if (isLoggingIn) {
+            const { extension, context } = await resolveAgentLoginTarget(
+              agent,
+              api
+            );
+            options.body = { extension, context };
+          }
 
-    console.log('[Superviseur] LOGIN/LOGOFF', path, options, agent);
-    await api(path, options);
+          console.log('[Superviseur] LOGIN/LOGOFF', path, options, agent);
+          await api(path, options);
 
-    // Mise à jour de l’état local
-    agent.logged = !agent.logged;
-    if (!agent.logged) {
-      agent.paused = false;
-    }
+          agent.logged = !agent.logged;
+          if (!agent.logged) {
+            agent.paused = false;
+          }
 
-    const newStatus = getStatusInfo(agent);
-    const newPause = getPauseInfo(agent);
-    statusTd.innerHTML = `<span class="pill ${newStatus.css}">${newStatus.text}</span>`;
-    pauseTd.innerHTML = `<span class="pill ${newPause.css}">${newPause.text}</span>`;
+          const newStatus = getStatusInfo(agent);
+          const newPause = getPauseInfo(agent);
+          statusTd.innerHTML = `<span class="pill ${newStatus.css}">${newStatus.text}</span>`;
+          pauseTd.innerHTML = `<span class="pill ${newPause.css}">${newPause.text}</span>`;
 
-    pauseBtn.disabled = !agent.logged;
-    loginBtn.textContent = agent.logged ? 'Logout' : 'Login';
-    loginBtn.classList.toggle('btn-logout', agent.logged);
-    loginBtn.classList.toggle('btn-login', !agent.logged);
-  } catch (err) {
-    console.error('[Superviseur] Erreur login/logout', err);
-    alert(
-      'Erreur lors du login/logout de cet agent.\n' +
-        (err.message || '')
-    );
-  } finally {
-    loginBtn.disabled = false;
-  }
-});
+          pauseBtn.disabled = !agent.logged;
+          loginBtn.textContent = agent.logged ? 'Logout' : 'Login';
+          setLoginButtonStyle(loginBtn, agent.logged);
+        } catch (err) {
+          console.error('[Superviseur] Erreur login/logout', err);
+          alert(
+            'Erreur lors du login/logout de cet agent.\n' +
+              (err.message || '')
+          );
+        } finally {
+          loginBtn.disabled = false;
+        }
+      });
+
       actionsCell.appendChild(pauseBtn);
       actionsCell.appendChild(loginBtn);
       tbody.appendChild(tr);
@@ -637,8 +839,16 @@ async function loadData(api) {
     console.log('[Superviseur] Queues reçues', queuesRaw);
     console.log('[Superviseur] Utilisateurs reçus', usersRaw);
 
-    const groups = groupAgentsByQueue(queuesRaw, usersRaw, agentsRaw);
-    renderQueues(groups, api);
+    const { groups, queuesMeta } = groupAgentsByQueue(
+      queuesRaw,
+      usersRaw,
+      agentsRaw
+    );
+
+    state.groups = groups;
+    state.queuesMeta = queuesMeta;
+
+    renderQueues(groups, api, queuesMeta);
 
     setStatus('Agents chargés.', 'success');
   } catch (err) {
@@ -649,6 +859,79 @@ async function loadData(api) {
     );
     renderEmptyState('Erreur lors du chargement des agents.');
   }
+}
+
+// -------------------------------------------------------------------
+// WebSocket temps réel (agentd / events bus)
+// -------------------------------------------------------------------
+
+function scheduleRealtimeReload(api) {
+  if (state.realtimeReloadScheduled) return;
+  state.realtimeReloadScheduled = true;
+
+  setTimeout(async () => {
+    state.realtimeReloadScheduled = false;
+    try {
+      await loadData(api);
+    } catch (e) {
+      console.error('[Superviseur] Erreur reload temps réel', e);
+    }
+  }, 2000);
+}
+
+function connectRealtime(baseUrl, token, api) {
+  const wsUrl =
+    baseUrl.replace(/^http/, 'ws') +
+    '/api/websocketd/1.0/events?token=' +
+    encodeURIComponent(token);
+
+  console.log('[Superviseur] Connexion WebSocket', wsUrl);
+
+  let ws;
+
+  try {
+    ws = new WebSocket(wsUrl);
+  } catch (err) {
+    console.error('[Superviseur] Échec création WebSocket', err);
+    return null;
+  }
+
+  ws.onopen = () => {
+    console.log('[Superviseur] WebSocket ouvert');
+  };
+
+  ws.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      console.log('[Superviseur] Event temps réel', data);
+
+      const topic = data.name || data.event || '';
+      if (
+        topic.includes('agentd') ||
+        topic.includes('queue') ||
+        topic.includes('call_center')
+      ) {
+        scheduleRealtimeReload(api);
+      }
+    } catch (err) {
+      console.error('[Superviseur] Erreur parsing WS message', err);
+    }
+  };
+
+  ws.onclose = (ev) => {
+    console.warn('[Superviseur] WebSocket fermé', ev.code, ev.reason);
+    setTimeout(() => {
+      if (state.api) {
+        state.websocket = connectRealtime(baseUrl, token, api);
+      }
+    }, 5000);
+  };
+
+  ws.onerror = (err) => {
+    console.error('[Superviseur] WebSocket error', err);
+  };
+
+  return ws;
 }
 
 // -------------------------------------------------------------------
@@ -676,7 +959,13 @@ async function loadData(api) {
     console.log('[Superviseur] Stack host :', baseUrl);
 
     const api = createApiClient(baseUrl, token);
+    state.api = api;
+    state.baseUrl = baseUrl;
+    state.token = token;
+
     await loadData(api);
+
+    state.websocket = connectRealtime(baseUrl, token, api);
   } catch (err) {
     console.error('[Superviseur] Erreur init :', err);
     setStatus(
