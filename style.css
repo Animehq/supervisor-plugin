@@ -661,7 +661,7 @@ body.is-dark .btn--secondary:disabled {
 
 /* Highlight court quand la file vient d'être mise à jour */
 .queue-card--updating {
-  box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.7), var(--shadow-card);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.9), var(--shadow-card);
   transition: box-shadow 0.25s ease-out;
 }
 /* ============================================================

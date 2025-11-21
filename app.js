@@ -508,7 +508,7 @@ function computeQueueStats(rows) {
     offline,
     waiting: 0,
     inCall: 0,
-    sla: '—',
+    missed: 0,
   };
 }
 
@@ -634,7 +634,8 @@ const updateHeaderStats = () => {
   badgeAgents.textContent = `${stats.logged}/${stats.totalAgents} connectés`;
   badgePaused.textContent = `${stats.paused} en pause`;
   badgeOffline.textContent = `${stats.offline} off`;
-  badgeCalls.textContent = `Attente: ${stats.waiting} · En cours: ${stats.inCall} · SLA: ${stats.sla}`;
+  badgeCalls.textContent = `Attente: ${stats.waiting} · En cours: ${stats.inCall} · Manqués: ${stats.missed}`;
+
 };
 
 // Petite animation visuelle quand la file est mise à jour
