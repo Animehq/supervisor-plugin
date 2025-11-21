@@ -1,34 +1,93 @@
 // app.js
 // ===================================================================
-// Superviseur Agents Wazo – temps réel + actions + drag & drop
+// Superviseur Agents – affichage par files d’attente + actions + temps réel
 // ===================================================================
 
 import { App } from 'https://cdn.jsdelivr.net/npm/@wazo/euc-plugins-sdk@latest/lib/esm/app.js';
 
 // -------------------------------------------------------------------
-// État global
+// Références DOM & état global
 // -------------------------------------------------------------------
 
 const statusEl = document.getElementById('status');
 const containerEl = document.getElementById('queues-container');
+const compactToggleEl = document.getElementById('compact-toggle');
+const themeToggleEl = document.getElementById('theme-toggle');
 
 const state = {
   api: null,
   baseUrl: null,
   token: null,
-  groups: new Map(),       // queueName -> rows[]
-  queuesMeta: new Map(),   // queueName -> { id, raw }
+  groups: new Map(),
+  queuesMeta: new Map(),
   websocket: null,
   realtimeReloadScheduled: false,
 };
 
+const uiState = {
+  compact: true, // compact actif par défaut
+  dark: true,    // dark actif par défaut
+};
+
+function syncCompactUI() {
+  const isCompact = uiState.compact;
+  document.body.classList.toggle('is-compact', isCompact);
+
+  if (compactToggleEl) {
+    compactToggleEl.classList.toggle('toggle--active', isCompact);
+    const label = compactToggleEl.querySelector('.toggle-label');
+    if (label) {
+      // On affiche l’action disponible (comme sur ton screen)
+      label.textContent = isCompact ? 'Mode normal' : 'Mode compact';
+    }
+  }
+}
+
+function syncThemeUI() {
+  const isDark = uiState.dark;
+  document.body.classList.toggle('is-dark', isDark);
+
+  if (themeToggleEl) {
+    themeToggleEl.classList.toggle('toggle--active', isDark);
+    const icon = themeToggleEl.querySelector('.toggle-icon');
+    const label = themeToggleEl.querySelector('.toggle-label');
+
+    if (icon) icon.textContent = isDark ? '☀️' : '🌙';
+    if (label) {
+      // Là aussi on affiche l’action : passer en clair / en sombre
+      label.textContent = isDark ? 'Thème clair' : 'Thème sombre';
+    }
+  }
+}
+
+// Écouteurs sur les toggles
+if (compactToggleEl) {
+  compactToggleEl.addEventListener('click', () => {
+    uiState.compact = !uiState.compact;
+    syncCompactUI();
+  });
+}
+
+if (themeToggleEl) {
+  themeToggleEl.addEventListener('click', () => {
+    uiState.dark = !uiState.dark;
+    syncThemeUI();
+  });
+}
+
+// Appliquer l’état initial (compact + dark actifs)
+syncCompactUI();
+syncThemeUI();
+
 // -------------------------------------------------------------------
-// Helpers UI
+// UI helpers
 // -------------------------------------------------------------------
+
+
 
 function setStatus(message, type = 'info') {
   if (!statusEl) {
-    console.warn('[Superviseur] Élément #status introuvable');
+    // pas de warning, on sort juste
     return;
   }
   statusEl.textContent = message || '';
@@ -37,34 +96,30 @@ function setStatus(message, type = 'info') {
 }
 
 function clearContainer() {
-  if (containerEl) {
-    containerEl.innerHTML = '';
-  } else {
-    console.warn('[Superviseur] Élément #queues-container introuvable');
+  if (!containerEl) {
+    // pas de warning
+    return;
   }
+  containerEl.innerHTML = '';
 }
 
 function renderEmptyState(message) {
   clearContainer();
   if (!containerEl) return;
   const div = document.createElement('div');
-  div.className = 'empty-state text-slate-500 text-sm';
+  div.className = 'empty-state';
   div.textContent = message;
   containerEl.appendChild(div);
 }
 
 function createActionButton(label, variant = 'secondary') {
-  const baseClasses =
-    'btn btn--sm inline-flex items-center gap-1 rounded-md text-xs font-medium px-2.5 py-1 transition';
-  let variantClasses =
-    'btn--secondary border border-slate-300 bg-white text-slate-700 hover:bg-slate-50';
+  const baseClasses = 'btn btn--sm';
+  let variantClasses = 'btn--secondary';
 
   if (variant === 'primary') {
-    variantClasses =
-      'btn--primary bg-blue-600 text-white hover:bg-blue-700 border border-blue-600';
+    variantClasses = 'btn--primary';
   } else if (variant === 'danger') {
-    variantClasses =
-      'btn--danger bg-rose-600 text-white hover:bg-rose-700 border border-rose-600';
+    variantClasses = 'btn--danger';
   }
 
   const btn = document.createElement('button');
@@ -76,20 +131,13 @@ function createActionButton(label, variant = 'secondary') {
 
 // Style spécifique pour le bouton Login/Logout
 function setLoginButtonStyle(btn, isLogged) {
-  const baseClasses =
-    'btn btn--sm inline-flex items-center gap-1 rounded-md text-xs font-medium px-2.5 py-1 transition';
-
-  const variantClasses = isLogged
-    ? 'btn--danger bg-rose-600 text-white hover:bg-rose-700 border border-rose-600'
-    : 'btn--primary bg-blue-600 text-white hover:bg-blue-700 border border-blue-600';
-
-  const extra = isLogged ? 'btn-logout' : 'btn-login';
-
-  btn.className = `${baseClasses} ${variantClasses} ${extra}`;
+  btn.className = 'btn btn--sm ' + (isLogged ? 'btn--danger' : 'btn--primary');
 }
 
+
+
 // -------------------------------------------------------------------
-// Client API générique basé sur host + token
+// Client API Wazo générique
 // -------------------------------------------------------------------
 
 function createApiClient(baseUrl, token) {
@@ -137,6 +185,20 @@ function createApiClient(baseUrl, token) {
       return null;
     }
   };
+}
+
+// Couleur personnalisée par file d'attente à partir de son nom
+function queueColorFromName(name) {
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) {
+    hash = name.charCodeAt(i) + ((hash << 5) - hash);
+  }
+
+  // Hue stable (0–360°)
+  const hue = Math.abs(hash) % 360;
+
+  // Couleurs pro (saturation/brightness modérés)
+  return `hsl(${hue}, 65%, 55%)`;
 }
 
 // -------------------------------------------------------------------
@@ -285,7 +347,7 @@ function groupAgentsByQueue(queuesRaw, usersRaw, agentsRaw) {
   const usersByUuid = buildUsersByUuidMap(usersRaw);
   const { byExt, byId, byUuid } = buildAgentsMaps(agentsRaw);
 
-  const groups = new Map();     // queueName -> rows[]
+  const groups = new Map(); // queueName -> rows[]
   const queuesMeta = new Map(); // queueName -> { id, raw }
 
   const ensureGroup = (label) => {
@@ -407,22 +469,22 @@ function groupAgentsByQueue(queuesRaw, usersRaw, agentsRaw) {
 
 function getStatusInfo(agent) {
   if (!agent.logged) {
-    return { text: 'Déconnecté', css: 'pill--offline bg-slate-100 text-slate-500' };
+    return { text: 'Déconnecté', css: 'pill--offline' };
   }
   if (agent.paused) {
-    return { text: 'En pause', css: 'pill--paused bg-amber-100 text-amber-700' };
+    return { text: 'En pause', css: 'pill--paused' };
   }
-  return { text: 'Connecté', css: 'pill--online bg-emerald-100 text-emerald-700' };
+  return { text: 'Connecté', css: 'pill--online' };
 }
 
 function getPauseInfo(agent) {
   if (!agent.logged) {
-    return { text: '—', css: 'pill--pause-no bg-slate-50 text-slate-400' };
+    return { text: '—', css: 'pill--pause-no' };
   }
   if (agent.paused) {
-    return { text: 'Oui', css: 'pill--pause-yes bg-amber-100 text-amber-700' };
+    return { text: 'Oui', css: 'pill--pause-yes' };
   }
-  return { text: 'Non', css: 'pill--pause-no bg-emerald-50 text-emerald-600' };
+  return { text: 'Non', css: 'pill--pause-no' };
 }
 
 function computeQueueStats(rows) {
@@ -444,14 +506,14 @@ function computeQueueStats(rows) {
     logged,
     paused,
     offline,
-    waiting: '—', // à câbler sur calld/queue stats si tu veux aller plus loin
-    inCall: '—',
+    waiting: 0,
+    inCall: 0,
     sla: '—',
   };
 }
 
 // -------------------------------------------------------------------
-// Drag & Drop – déplacement d’un agent entre files
+// Drag & drop – déplacement d’un agent entre files
 // -------------------------------------------------------------------
 
 async function moveAgentBetweenQueues(agentId, fromQueueId, toQueueId, api) {
@@ -497,9 +559,6 @@ function renderQueues(groups, api, queuesMeta) {
     return;
   }
 
-  containerEl.className =
-    'queues-container flex flex-col gap-4 xl:grid xl:grid-cols-2 2xl:grid-cols-3';
-
   const SUPPORT_IT_PATTERN = /support\s*it/i;
 
   const orderedKeys = Array.from(groups.keys())
@@ -530,68 +589,81 @@ function renderQueues(groups, api, queuesMeta) {
     const queueId = queueMeta.id || null;
     const stats = computeQueueStats(rows);
 
-    const section = document.createElement('section');
-    section.className =
-      'queue-card bg-white rounded-2xl shadow-[0_18px_35px_rgba(15,23,42,0.07)] border border-slate-200/60 p-4 flex flex-col';
-    section.dataset.queueId = queueId || '';
+const section = document.createElement('section');
+section.className = 'queue-card';
+
+// Couleur personnalisée par file
+const color = queueColorFromName(queueName);
+section.style.borderLeft = `4px solid ${color}`;
+
+// Option : halo léger autour de la carte en dark mode
+if (document.body.classList.contains('is-dark')) {
+  section.style.boxShadow = `0 0 0 1px ${color}22, var(--shadow-card)`;
+}
+
+if (SUPPORT_IT_PATTERN.test(queueName)) {
+  section.classList.add('queue-card--priority');
+}
+
+section.dataset.queueId = queueId || '';
 
     const header = document.createElement('header');
-    header.className =
-      'queue-card__header flex items-center justify-between gap-3 pb-2 border-b border-slate-200 mb-3';
+    header.className = 'queue-card__header';
 
     const title = document.createElement('h2');
     title.textContent = queueName;
-    title.className = 'text-sm font-semibold text-slate-900 flex items-center gap-2';
 
     const meta = document.createElement('div');
-    meta.className = 'queue-card__meta flex items-center gap-2 text-[11px] text-slate-600';
+    meta.className = 'queue-card__meta';
 
     const badgeAgents = document.createElement('span');
-    badgeAgents.className =
-      'badge badge--count bg-sky-50 text-sky-700 border border-sky-200 rounded-full px-2 py-0.5';
+    badgeAgents.className = 'badge badge--light-blue';
     badgeAgents.textContent = `${stats.logged}/${stats.totalAgents} connectés`;
 
     const badgePaused = document.createElement('span');
-    badgePaused.className =
-      'badge bg-amber-50 text-amber-700 border border-amber-200 rounded-full px-2 py-0.5';
+    badgePaused.className = 'badge badge--amber';
     badgePaused.textContent = `${stats.paused} en pause`;
 
     const badgeOffline = document.createElement('span');
-    badgeOffline.className =
-      'badge bg-slate-50 text-slate-500 border border-slate-200 rounded-full px-2 py-0.5';
+    badgeOffline.className = 'badge badge--muted';
     badgeOffline.textContent = `${stats.offline} off`;
+
+    const badgeCalls = document.createElement('span');
+    badgeCalls.className = 'badge badge--muted';
+    badgeCalls.textContent = `Attente: ${stats.waiting} · En cours: ${stats.inCall} · SLA: ${stats.sla}`;
 
     meta.appendChild(badgeAgents);
     meta.appendChild(badgePaused);
     meta.appendChild(badgeOffline);
+    meta.appendChild(badgeCalls);
 
     header.appendChild(title);
     header.appendChild(meta);
     section.appendChild(header);
 
     const body = document.createElement('div');
-    body.className = 'queue-card__body overflow-x-auto';
+    body.className = 'queue-card__body';
 
     const table = document.createElement('table');
-    table.className = 'agents-table w-full border-collapse text-xs';
+    table.className = 'agents-table';
     table.dataset.queueId = queueId || '';
 
     const thead = document.createElement('thead');
     thead.innerHTML = `
-      <tr class="bg-slate-50">
-        <th class="px-2 py-1 text-left text-[11px] font-semibold text-slate-500">NOM</th>
-        <th class="px-2 py-1 text-left text-[11px] font-semibold text-slate-500">EXTENSION</th>
-        <th class="px-2 py-1 text-left text-[11px] font-semibold text-slate-500">ÉTAT</th>
-        <th class="px-2 py-1 text-left text-[11px] font-semibold text-slate-500">PAUSE</th>
-        <th class="px-2 py-1 text-left text-[11px] font-semibold text-slate-500">SUPERVISION</th>
-        <th class="px-2 py-1 text-left text-[11px] font-semibold text-slate-500 col-actions">ACTIONS</th>
+      <tr>
+        <th>NOM</th>
+        <th>EXTENSION</th>
+        <th>ÉTAT</th>
+        <th>PAUSE</th>
+        <th>SUPERVISION</th>
+        <th class="col-actions">ACTIONS</th>
       </tr>
     `;
     table.appendChild(thead);
 
     const tbody = document.createElement('tbody');
 
-    // Drag & drop – cible
+    // DnD – cible
     table.addEventListener('dragover', (ev) => {
       ev.preventDefault();
       ev.dataTransfer.dropEffect = 'move';
@@ -642,16 +714,15 @@ function renderQueues(groups, api, queuesMeta) {
       const supervisionCell = tr.querySelector('.col-supervision');
       const actionsCell = tr.querySelector('.col-actions');
 
-      // DnD – source
       tr.dataset.agentId = agent.id || '';
       tr.dataset.queueId = agent.queueId || '';
 
       if (agent.id && agent.queueId) {
         tr.draggable = true;
-        tr.classList.add('cursor-move', 'hover:bg-slate-50');
 
         tr.addEventListener('dragstart', (ev) => {
           ev.dataTransfer.effectAllowed = 'move';
+          tr.classList.add('dragging');
           ev.dataTransfer.setData(
             'application/json',
             JSON.stringify({
@@ -659,6 +730,10 @@ function renderQueues(groups, api, queuesMeta) {
               fromQueueId: agent.queueId,
             })
           );
+        });
+
+        tr.addEventListener('dragend', () => {
+          tr.classList.remove('dragging');
         });
       }
 
@@ -674,9 +749,7 @@ function renderQueues(groups, api, queuesMeta) {
         return;
       }
 
-      // -------------------------------------------------------------------
       // SUPERVISION (Join / Spy / Whisper) – hooks à câbler sur calld
-      // -------------------------------------------------------------------
       const joinBtn = createActionButton('Join', 'secondary');
       const spyBtn = createActionButton('Spy', 'secondary');
       const whisperBtn = createActionButton('Whisper', 'secondary');
@@ -700,9 +773,7 @@ function renderQueues(groups, api, queuesMeta) {
       supervisionCell.appendChild(spyBtn);
       supervisionCell.appendChild(whisperBtn);
 
-      // -------------------------------------------------------------------
-      // BOUTON PAUSE / REPRENDRE
-      // -------------------------------------------------------------------
+      // BOUTON PAUSE / REPRENDRE (by-number)
       const pauseBtn = createActionButton(
         agent.paused ? 'Reprendre' : 'Pause',
         'secondary'
@@ -753,9 +824,7 @@ function renderQueues(groups, api, queuesMeta) {
         }
       });
 
-      // -------------------------------------------------------------------
-      // BOUTON LOGIN / LOGOUT (avec résolution context via confd)
-      // -------------------------------------------------------------------
+      // BOUTON LOGIN / LOGOUT (by-id + context depuis confd)
       const loginBtn = document.createElement('button');
       loginBtn.type = 'button';
       loginBtn.textContent = agent.logged ? 'Logout' : 'Login';
@@ -786,9 +855,23 @@ function renderQueues(groups, api, queuesMeta) {
           await api(path, options);
 
           agent.logged = !agent.logged;
-          if (!agent.logged) {
-            agent.paused = false;
-          }
+          // Mise à jour visuelle du bouton Pause
+if (!agent.logged) {
+  agent.paused = false; // sécurité
+  pauseBtn.textContent = "Pause";
+  pauseBtn.classList.remove("btn--pause-active");
+  pauseBtn.classList.add("btn--pause-disabled");
+} else {
+  pauseBtn.classList.remove("btn--pause-disabled");
+  if (agent.paused) {
+    pauseBtn.classList.add("btn--pause-active");
+    pauseBtn.textContent = "Reprendre";
+  } else {
+    pauseBtn.classList.remove("btn--pause-active");
+    pauseBtn.textContent = "Pause";
+  }
+}
+
 
           const newStatus = getStatusInfo(agent);
           const newPause = getPauseInfo(agent);
@@ -796,6 +879,7 @@ function renderQueues(groups, api, queuesMeta) {
           pauseTd.innerHTML = `<span class="pill ${newPause.css}">${newPause.text}</span>`;
 
           pauseBtn.disabled = !agent.logged;
+          pauseBtn.textContent = agent.paused ? 'Reprendre' : 'Pause';
           loginBtn.textContent = agent.logged ? 'Logout' : 'Login';
           setLoginButtonStyle(loginBtn, agent.logged);
         } catch (err) {
@@ -862,7 +946,7 @@ async function loadData(api) {
 }
 
 // -------------------------------------------------------------------
-// WebSocket temps réel (agentd / events bus)
+// WebSocket temps réel
 // -------------------------------------------------------------------
 
 function scheduleRealtimeReload(api) {
@@ -876,7 +960,7 @@ function scheduleRealtimeReload(api) {
     } catch (e) {
       console.error('[Superviseur] Erreur reload temps réel', e);
     }
-  }, 2000);
+  }, 1500);
 }
 
 function connectRealtime(baseUrl, token, api) {

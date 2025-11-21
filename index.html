@@ -1,7 +1,6 @@
 <!DOCTYPE html>
 <html lang="fr">
   <head>
-    <script src="https://cdn.tailwindcss.com"></script>
     <meta charset="UTF-8" />
     <title>Supervision des Agents</title>
     <link rel="stylesheet" href="./style.css" />
@@ -9,16 +8,33 @@
   <body>
     <div class="page">
       <header class="page-header">
-        <div class="page-header-left">
-          <h1>Supervision des Agents</h1>
-          <p class="page-subtitle">Wazo E-UC</p>
-        </div>
-        <div id="status" class="status status--info">
-          Initialisation du plugin…
-        </div>
-      </header>
+  <div class="page-header-left">
+    <h1>Supervision des Agents</h1>
+    <p class="page-subtitle">Wazo E-UC</p>
+  </div>
 
-      <!-- Conteneur dans lequel on injecte les 3 tableaux -->
+  <div class="page-header-right">
+  <div class="header-switches">
+    <div class="switch-row">
+      <span class="switch-label">Mode compact</span>
+      <button id="compact-toggle" class="toggle-switch" type="button"></button>
+    </div>
+
+    <div class="switch-row">
+      <span class="switch-label">Thème sombre</span>
+      <button id="theme-toggle" class="toggle-switch" type="button"></button>
+    </div>
+  </div>
+
+  <div id="status" class="status status--info">
+    Initialisation du plugin…
+  </div>
+</div>
+
+</header>
+
+
+      <!-- Conteneur dans lequel on injecte les files -->
       <main id="queues-container" class="queues-container">
         <!-- Rempli côté JavaScript -->
       </main>

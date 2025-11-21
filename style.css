@@ -1,6 +1,100 @@
-/* ------------------------------
-   Base layout
-   ------------------------------ */
+/* ============================================================
+   PALETTE GLOBALE (mode clair + sombre)
+   ============================================================ */
+
+:root {
+  /* Fond général */
+  --color-bg:            #f2f4f7;   /* fond clair "SaaS" */
+  --color-bg-soft:       #e5e7eb;
+  --color-bg-elevated:   #ffffff;
+
+  /* Contenu / texte */
+  --color-text:          #0f172a;
+  --color-text-muted:    #6b7280;
+  --color-text-soft:     #9ca3af;
+
+  /* Bordures / séparateurs */
+  --color-border-soft:   #e5e7eb;
+  --color-border-medium: #cbd5e1;
+
+  /* Accent principal */
+  --color-primary:       #2563eb;
+  --color-primary-dark:  #1d4ed8;
+  --color-primary-soft:  #eff6ff;
+
+  /* Danger */
+  --color-danger:        #e11d48;
+  --color-danger-dark:   #be123c;
+  --color-danger-soft:   #fef2f2;
+
+  /* Warning */
+  --color-warning:       #f59e0b;
+  --color-warning-soft:  #fef3c7;
+
+  /* Success */
+  --color-success:       #16a34a;
+  --color-success-soft:  #dcfce7;
+
+  /* Off / neutre (déconnecté) */
+  --color-off-bg:        #f3f4f6;
+  --color-off-border:    #e5e7eb;
+  --color-off-text:      #6b7280;
+
+  /* Cartes / ombres */
+  --color-card-bg:       #ffffff;
+  --color-card-border:   rgba(148, 163, 184, 0.25);
+  --shadow-card:         0 18px 35px rgba(15, 23, 42, 0.07);
+}
+
+/* Mode sombre - activé via .is-dark sur <html> ou <body> */
+:root.is-dark,
+body.is-dark {
+  /* Fond général */
+  --color-bg:            #0b1120;
+  --color-bg-soft:       #020617;
+  --color-bg-elevated:   #020617;
+
+  /* Contenu / texte */
+  --color-text:          #e5e7eb;
+  --color-text-muted:    #9ca3af;
+  --color-text-soft:     #6b7280;
+
+  /* Bordures */
+  --color-border-soft:   #1f2937;
+  --color-border-medium: #374151;
+
+  /* Accent principal */
+  --color-primary:       #60a5fa;
+  --color-primary-dark:  #3b82f6;
+  --color-primary-soft:  #1e293b;
+
+  /* Danger */
+  --color-danger:        #fb7185;
+  --color-danger-dark:   #f97373;
+  --color-danger-soft:   #450a0a;
+
+  /* Warning */
+  --color-warning:       #fb923c;
+  --color-warning-soft:  #451a03;
+
+  /* Success */
+  --color-success:       #22c55e;
+  --color-success-soft:  #022c22;
+
+  /* Off / neutre (déconnecté) */
+  --color-off-bg:        #1f2937;
+  --color-off-border:    #374151;
+  --color-off-text:      #9ca3af;
+
+  /* Cartes / ombres */
+  --color-card-bg:       #020617;
+  --color-card-border:   #1f2937;
+  --shadow-card:         0 18px 35px rgba(0, 0, 0, 0.6);
+}
+
+/* ============================================================
+   BASE LAYOUT
+   ============================================================ */
 
 *,
 *::before,
@@ -17,11 +111,11 @@ body {
 body {
   font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
     sans-serif;
-  background: radial-gradient(circle at top, #e5e7eb 0, #f3f4f6 35%, #e5e7eb 100%);
-  color: #111827;
+  background-color: var(--color-bg); /* ✅ fond uni pro */
+  color: var(--color-text);
 }
 
-/* Container global */
+/* Conteneur global */
 
 .page {
   max-width: 1200px;
@@ -29,13 +123,17 @@ body {
   padding: 2rem 1.5rem 3rem;
 }
 
-/* ------------------------------
-   Header
-   ------------------------------ */
+body.is-compact .page {
+  padding-top: 1rem;
+}
+
+/* ============================================================
+   HEADER / STATUT / TOGGLES
+   ============================================================ */
 
 .page-header {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 1.25rem;
   margin-bottom: 1.75rem;
@@ -50,40 +148,73 @@ body {
 
 .page-subtitle {
   margin: 0.25rem 0 0;
-  font-size: 0.9rem;
-  color: #6b7280;
+  font-size: 0.85rem;
+  color: var(--color-text-muted);
 }
 
-/* Bandeau de statut */
+.page-header-right {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.5rem;
+}
+
+/* Status global (texte "Agents chargés.", erreurs, etc.) */
 
 .status {
-  min-width: 200px;
-  padding: 0.45rem 0.9rem;
+  padding: 0.35rem 0.9rem;
   border-radius: 999px;
-  font-size: 0.8rem;
+  font-size: 0.75rem;
   font-weight: 500;
-  text-align: center;
-  box-shadow: 0 0 0 1px rgba(148, 163, 184, 0.15);
+  border: 1px solid transparent;
+  min-width: 220px;
+  text-align: right;
 }
 
 .status--info {
-  background-color: #e5f3ff;
-  color: #1d4ed8;
+  background-color: var(--color-primary-soft);
+  border-color: var(--color-primary-dark);
+  color: var(--color-primary-dark);
 }
 
 .status--success {
-  background-color: #dcfce7;
-  color: #166534;
+  background-color: var(--color-success-soft);
+  border-color: #bbf7d0;
+  color: var(--color-success);
 }
 
 .status--error {
-  background-color: #fee2e2;
+  background-color: var(--color-danger-soft);
+  border-color: #fecaca;
   color: #b91c1c;
 }
 
-/* ------------------------------
-   Cartes de file d'attente
-   ------------------------------ */
+/* Boutons de vue (Mode compact / Thème sombre) */
+
+.view-toggles {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.btn-toggle {
+  border-radius: 999px;
+  border: 1px solid var(--color-border-medium);
+  padding: 0.25rem 0.75rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+  background: var(--color-bg-elevated);
+  color: var(--color-primary);
+  cursor: pointer;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+}
+
+.btn-toggle:hover {
+  background: var(--color-primary-soft);
+}
+
+/* ============================================================
+   LAYOUT DES FILES
+   ============================================================ */
 
 .queues-container {
   display: flex;
@@ -94,15 +225,19 @@ body {
 /* Une carte par file */
 
 .queue-card {
-  background-color: #ffffff;
+  background-color: var(--color-card-bg);
   border-radius: 1rem;
-  box-shadow: 0 18px 35px rgba(15, 23, 42, 0.07);
+  box-shadow: var(--shadow-card);
   padding: 1.1rem 1.4rem 1.25rem;
-  border: 1px solid rgba(148, 163, 184, 0.25);
+  border: 1px solid var(--color-card-border);
+}
+
+body.is-compact .queue-card {
+  padding: 0.6rem 0.75rem 0.7rem;
 }
 
 .queue-card--priority {
-  border-left: 4px solid #2563eb;
+  border-left: 4px solid var(--color-primary);
 }
 
 /* Header de file */
@@ -113,60 +248,78 @@ body {
   justify-content: space-between;
   gap: 0.75rem;
   padding-bottom: 0.75rem;
-  border-bottom: 1px solid #e5e7eb;
+  border-bottom: 1px solid var(--color-border-soft);
   margin-bottom: 0.75rem;
+}
+
+body.is-compact .queue-card__header {
+  margin-bottom: 0.4rem;
+  padding-bottom: 0.4rem;
 }
 
 .queue-card__header h2 {
   margin: 0;
-  font-size: 1.05rem;
+  font-size: 0.95rem;
   font-weight: 600;
-  color: #111827;
 }
 
 .queue-card__meta {
   display: flex;
-  align-items: center;
-  gap: 0.5rem;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  justify-content: flex-end;
 }
 
-/* Badges */
+/* Badges (stats) */
 
 .badge {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  padding: 0.15rem 0.55rem;
   border-radius: 999px;
-  font-size: 0.75rem;
+  padding: 0.15rem 0.6rem;
+  font-size: 0.7rem;
   font-weight: 500;
-  white-space: nowrap;
+  border: 1px solid transparent;
 }
 
-.badge--count {
-  background-color: #eff6ff;
-  color: #1d4ed8;
-  border: 1px solid rgba(59, 130, 246, 0.25);
+.badge--light-blue {
+  background-color: var(--color-primary-soft);
+  border-color: var(--color-primary-dark);
+  color: var(--color-primary-dark);
 }
 
-/* Contenu */
+.badge--amber {
+  background-color: var(--color-warning-soft);
+  border-color: var(--color-warning);
+  color: #92400e;
+}
+
+.badge--muted {
+  background-color: var(--color-bg-soft);
+  border-color: var(--color-border-soft);
+  color: var(--color-text-soft);
+}
+
+/* ============================================================
+   TABLE DES AGENTS
+   ============================================================ */
 
 .queue-card__body {
   overflow-x: auto;
 }
 
-/* ------------------------------
-   Tableau des agents
-   ------------------------------ */
-
 .agents-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 0.9rem;
+  font-size: 0.78rem;
+}
+
+body.is-compact .agents-table {
+  font-size: 0.7rem;
 }
 
 .agents-table thead tr {
-  background-color: #f9fafb;
+  background-color: var(--color-bg-soft);
 }
 
 .agents-table th,
@@ -176,246 +329,318 @@ body {
   white-space: nowrap;
 }
 
+body.is-compact .agents-table th,
+body.is-compact .agents-table td {
+  padding: 0.35rem 0.4rem;
+}
+
 .agents-table th {
-  font-size: 0.78rem;
+  font-size: 0.7rem;
   font-weight: 600;
-  color: #6b7280;
-  border-bottom: 1px solid #e5e7eb;
+  color: var(--color-text-soft);
+  border-bottom: 1px solid var(--color-border-soft);
 }
 
-/* Lignes */
-
-.agent-row:nth-child(odd) {
-  background-color: #ffffff;
+.agents-table td {
+  border-bottom: 1px solid var(--color-border-soft);
 }
 
-.agent-row:nth-child(even) {
-  background-color: #f9fafb;
-}
-
-.agent-row--online {
-  /* léger hint vert */
-  box-shadow: inset 3px 0 0 #22c55e33;
-}
-
-.agent-row--paused {
-  box-shadow: inset 3px 0 0 #f9731633;
-}
-
-.agent-row--offline {
-  box-shadow: inset 3px 0 0 #9ca3af33;
+.agents-table tr:last-child td {
+  border-bottom: none;
 }
 
 .agents-table tbody tr:hover {
-  background-color: #eef2ff;
+  background-color: var(--color-bg-soft);
 }
+
+/* Colonnes */
 
 .col-actions {
-  text-align: right;
+  min-width: 110px;
+}
+
+.col-supervision {
   min-width: 160px;
+  display: flex;
+  gap: 0.25rem;
 }
 
-/* ------------------------------
-   Pills (état / pause)
-   ------------------------------ */
+/* Drag & drop */
 
-.pill {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 80px;
-  padding: 0.15rem 0.55rem;
-  border-radius: 999px;
-  font-size: 0.78rem;
-  font-weight: 500;
+.agents-table tbody tr {
+  transition: background-color 0.1s ease, transform 0.1s ease;
 }
 
-.pill--status-online {
-  background-color: #dcfce7;
-  color: #166534;
+.agents-table tbody tr.dragging {
+  opacity: 0.8;
+  transform: scale(0.997);
 }
 
-.pill--status-paused {
-  background-color: #fef3c7;
-  color: #92400e;
-}
-
-.pill--status-offline {
-  background-color: #e5e7eb;
-  color: #4b5563;
-}
-
-.pill--pause {
-  background-color: #f3f4f6;
-  color: #4b5563;
-}
-
-/* ------------------------------
-   État vide
-   ------------------------------ */
+/* Etat vide */
 
 .empty-state {
-  margin-top: 1rem;
   padding: 1rem 1.25rem;
-  border-radius: 0.85rem;
-  background-color: #f9fafb;
-  color: #6b7280;
-  font-size: 0.9rem;
-  border: 1px dashed #e5e7eb;
+  border-radius: 0.75rem;
+  background-color: var(--color-bg-soft);
+  border: 1px dashed var(--color-border-soft);
+  font-size: 0.8rem;
 }
 
-/* ------------------------------
-   Boutons
-   ------------------------------ */
+/* ============================================================
+   PILLS (ÉTAT / PAUSE)
+   ============================================================ */
 
-.btn {
-  border: none;
-  border-radius: 999px;
-  padding: 0.25rem 0.9rem;
-  font-size: 0.82rem;
-  font-weight: 500;
-  cursor: pointer;
-  transition: background-color 0.15s ease, color 0.15s ease,
-    opacity 0.15s ease, box-shadow 0.15s ease, transform 0.05s ease;
+.pill {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-}
-
-.btn--sm {
-  font-size: 0.8rem;
-  padding: 0.25rem 0.8rem;
-}
-
-/* Espacement entre boutons d'action */
-.col-actions .btn + .btn {
-  margin-left: 0.4rem;
-}
-
-/* Bleu = action principale (Login, etc.) */
-.btn--primary {
-  background-color: #2563eb;
-  color: #ffffff;
-  box-shadow: 0 1px 3px rgba(37, 99, 235, 0.35);
-}
-.btn--primary:hover {
-  background-color: #1d4ed8;
-  transform: translateY(-1px);
-}
-
-/* Gris clair = action secondaire (Pause) */
-.btn--secondary {
-  background-color: #e5e7eb;
-  color: #111827;
-}
-.btn--secondary:hover {
-  background-color: #d1d5db;
-}
-
-/* Bouton disabled */
-
-.btn:disabled {
-  opacity: 0.5;
-  cursor: default;
-  box-shadow: none;
-  transform: none;
-}
-
-/* ------------------------------
-   Responsive
-   ------------------------------ */
-
-@media (max-width: 768px) {
-  .page {
-    padding: 1.25rem 1rem 2rem;
-  }
-
-  .page-header {
-    flex-direction: column;
-    align-items: flex-start;
-  }
-
-  .status {
-    align-self: stretch;
-    text-align: center;
-  }
-
-  .agents-table th,
-  .agents-table td {
-    padding: 0.45rem 0.5rem;
-  }
-}
-
-/* ============================
-   PASTILLES ÉTAT & PAUSE
-   ============================ */
-
-.pill {
-  display: inline-block;
-  padding: 4px 10px;
   border-radius: 999px;
-  font-size: 12px;
-  font-weight: 600;
-  color: #fff;
+  padding: 0.15rem 0.6rem;
+  font-size: 0.68rem;
+  font-weight: 500;
 }
 
 .pill--online {
-  background-color: #16a34a; /* vert */
+  background-color: var(--color-success-soft);
+  color: var(--color-success);
 }
 
 .pill--paused {
-  background-color: #f59e0b; /* orange */
+  background-color: var(--color-warning-soft);
+  color: var(--color-warning);
 }
 
 .pill--offline {
-  background-color: #6b7280; /* gris */
+  background-color: var(--color-off-bg);
+  color: var(--color-off-text);
 }
 
 .pill--pause-yes {
-  background-color: #f59e0b; /* orange */
+  background-color: var(--color-warning-soft);
+  color: var(--color-warning);
 }
 
 .pill--pause-no {
-  background-color: #16a34a; /* vert */
+  background-color: var(--color-success-soft);
+  color: var(--color-success);
 }
 
-/* ============================
-   BOUTONS COLORÉS
-   ============================ */
+/* ============================================================
+   BOUTONS
+   ============================================================ */
 
-.btn-login {
-  background-color: #2563eb;
-  color: white;
+.btn {
+  border-radius: 999px;
+  border: 1px solid transparent;
+  padding: 0.2rem 0.7rem;
+  font-size: 0.74rem;
+  font-weight: 500;
+  cursor: pointer;
 }
 
-.btn-login:hover {
-  background-color: #1d4ed8;
+.btn--sm {
+  font-size: 0.72rem;
 }
 
-.btn-logout {
-  background-color: #dc2626;
-  color: white;
+.btn--primary {
+  background-color: var(--color-primary);
+  border-color: var(--color-primary-dark);
+  color: #ffffff;
 }
 
-.btn-logout:hover {
-  background-color: #b91c1c;
+.btn--primary:hover {
+  background-color: var(--color-primary-dark);
 }
 
-.btn-pause {
-  background-color: #f59e0b;
-  color: white;
+.btn--danger {
+  background-color: var(--color-danger);
+  border-color: var(--color-danger-dark);
+  color: #ffffff;
 }
 
-.btn-pause:hover {
-  background-color: #d97706;
+.btn--danger:hover {
+  background-color: var(--color-danger-dark);
 }
 
-.btn-resume {
-  background-color: #16a34a;
-  color: white;
+.btn--secondary {
+  background-color: var(--color-bg-elevated);
+  border-color: var(--color-border-medium);
+  color: var(--color-text-muted);
 }
 
-.btn-resume:hover {
-  background-color: #15803d;
+.btn--secondary:hover {
+  background-color: var(--color-bg-soft);
 }
 
+/* Boutons désactivés (ex : Pause quand agent déconnecté) */
+
+.btn:disabled {
+  cursor: default !important;
+  opacity: 1 !important;
+  pointer-events: none !important;
+}
+
+.btn--secondary:disabled {
+  background-color: var(--color-off-bg) !important;
+  border-color: var(--color-off-border) !important;
+  color: var(--color-off-text) !important;
+}
+
+.status {
+  min-width: 200px;
+  padding: 0.3rem 0.9rem;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 500;
+  text-align: center;
+  box-shadow: none;
+  border: 1px solid transparent;
+}
+
+.status--success {
+  background-color: rgba(22, 163, 74, 0.06);
+  color: #16a34a;
+  border: 1px solid rgba(22, 163, 74, 0.45);
+}
+
+body.is-dark .status--success {
+  background-color: rgba(22, 163, 74, 0.15);
+  color: #4ade80;
+  border-color: rgba(34, 197, 94, 0.7);
+}
+
+/* Header aligné titre / toggles / statut */
+.page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1.5rem;
+  margin-bottom: 1.5rem;
+}
+
+.page-header-left h1 {
+  margin: 0;
+}
+
+.page-header-left .page-subtitle {
+  margin: 0.25rem 0 0;
+  font-size: 0.85rem;
+}
+
+.page-header-right {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.5rem;
+}
+
+/* Ligne texte + switch */
+.header-switches {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.switch-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.switch-label {
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+}
+
+/* Bouton switch type iOS */
+.toggle-switch {
+  position: relative;
+  width: 42px;
+  height: 24px;
+  padding: 0;
+  border-radius: 999px;
+  border: none;
+  background-color: #e5e7eb; /* track OFF */
+  cursor: pointer;
+  box-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.7);
+}
+
+/* Thumb */
+.toggle-switch::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background-color: #ffffff;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.2);
+  transition: transform 0.16s ease, background-color 0.16s ease;
+}
+
+/* ON = ton JS ajoute/retire déjà .toggle--active */
+.toggle-switch.toggle--active {
+  background-color: #0d9488; /* teal ON */
+  box-shadow: inset 0 0 0 1px rgba(5, 150, 105, 0.9);
+}
+
+.toggle-switch.toggle--active::after {
+  transform: translateX(18px);
+}
+
+/* Dark mode : piste un peu plus sombre */
+body.is-dark .toggle-switch {
+  background-color: #1f2937;
+  box-shadow: inset 0 0 0 1px #111827;
+}
+
+body.is-dark .toggle-switch.toggle--active {
+  background-color: #059669;
+  box-shadow: inset 0 0 0 1px #16a34a;
+}
+
+
+/* Statut “Agents chargés” plus propre */
+.status {
+  min-width: 200px;
+  padding: 0.3rem 0.9rem;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 500;
+  text-align: center;
+  box-shadow: none;
+  border: 1px solid transparent;
+}
+
+.status--success {
+  background-color: rgba(22, 163, 74, 0.06);
+  color: #16a34a;
+  border: 1px solid rgba(22, 163, 74, 0.45);
+}
+
+body.is-dark .status--success {
+  background-color: rgba(22, 163, 74, 0.15);
+  color: #4ade80;
+  border-color: rgba(34, 197, 94, 0.7);
+}
+
+/* Bouton Pause actif (agent connecté) */
+.btn--pause-active {
+  background-color: var(--color-warning-soft) !important;
+  border-color: var(--color-warning) !important;
+  color: var(--color-warning) !important;
+}
+
+/* Bouton Pause désactivé (agent déconnecté) */
+.btn--pause-disabled {
+  background-color: var(--color-off-bg) !important;
+  border-color: var(--color-off-border) !important;
+  color: var(--color-off-text) !important;
+  cursor: default !important;
+  pointer-events: none !important;
+}
+
+/* ============================================================
+   FIN
+   ============================================================ */
