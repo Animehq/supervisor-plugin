@@ -641,6 +641,25 @@ body.is-dark .status--success {
   pointer-events: none !important;
 }
 
+/* ============================
+   Contraste fort pour PAUSE désactivé
+   ============================ */
+
+/* Mode clair : gros bouton gris bien visible */
+body:not(.is-dark) .btn--secondary:disabled {
+  background-color: #e5e7eb !important;  /* gris clair plein */
+  border-color: #d1d5db !important;
+  color: #9ca3af !important;
+}
+
+/* Mode sombre : bouton presque noir, texte gris */
+body.is-dark .btn--secondary:disabled {
+  background-color: #020617 !important;  /* quasi noir */
+  border-color: #111827 !important;
+  color: #6b7280 !important;
+}
+
+
 /* ============================================================
    FIN
    ============================================================ */
