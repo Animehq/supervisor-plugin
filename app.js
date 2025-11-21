@@ -586,8 +586,8 @@ function renderQueues(groups, api, queuesMeta) {
     });
 
     const queueMeta = queuesMeta.get(queueName) || {};
-    const queueId = queueMeta.id || null;
-    const stats = computeQueueStats(rows);
+    let queueId = queueMeta.id || null;
+    let stats = computeQueueStats(rows);
 
 const section = document.createElement('section');
 section.className = 'queue-card';
@@ -617,20 +617,35 @@ section.dataset.queueId = queueId || '';
     meta.className = 'queue-card__meta';
 
     const badgeAgents = document.createElement('span');
-    badgeAgents.className = 'badge badge--light-blue';
-    badgeAgents.textContent = `${stats.logged}/${stats.totalAgents} connectés`;
+badgeAgents.className = 'badge badge--light-blue';
 
-    const badgePaused = document.createElement('span');
-    badgePaused.className = 'badge badge--amber';
-    badgePaused.textContent = `${stats.paused} en pause`;
+const badgePaused = document.createElement('span');
+badgePaused.className = 'badge badge--amber';
 
-    const badgeOffline = document.createElement('span');
-    badgeOffline.className = 'badge badge--muted';
-    badgeOffline.textContent = `${stats.offline} off`;
+const badgeOffline = document.createElement('span');
+badgeOffline.className = 'badge badge--muted';
 
-    const badgeCalls = document.createElement('span');
-    badgeCalls.className = 'badge badge--muted';
-    badgeCalls.textContent = `Attente: ${stats.waiting} · En cours: ${stats.inCall} · SLA: ${stats.sla}`;
+const badgeCalls = document.createElement('span');
+badgeCalls.className = 'badge badge--muted';
+
+// Recalcule les stats à partir de `rows` et met à jour les badges
+const updateHeaderStats = () => {
+  stats = computeQueueStats(rows);
+  badgeAgents.textContent = `${stats.logged}/${stats.totalAgents} connectés`;
+  badgePaused.textContent = `${stats.paused} en pause`;
+  badgeOffline.textContent = `${stats.offline} off`;
+  badgeCalls.textContent = `Attente: ${stats.waiting} · En cours: ${stats.inCall} · SLA: ${stats.sla}`;
+};
+
+// Petite animation visuelle quand la file est mise à jour
+const flashUpdating = () => {
+  section.classList.add('queue-card--updating');
+  setTimeout(() => section.classList.remove('queue-card--updating'), 300);
+};
+
+// Initialisation des badges à partir de l’état courant
+updateHeaderStats();
+
 
     meta.appendChild(badgeAgents);
     meta.appendChild(badgePaused);
@@ -813,6 +828,9 @@ section.dataset.queueId = queueId || '';
           pauseTd.innerHTML = `<span class="pill ${newPause.css}">${newPause.text}</span>`;
 
           pauseBtn.textContent = agent.paused ? 'Reprendre' : 'Pause';
+updateHeaderStats();
+flashUpdating();
+
         } catch (err) {
           console.error('[Superviseur] Erreur pause/reprendre', err);
           alert(
@@ -874,14 +892,18 @@ if (!agent.logged) {
 
 
           const newStatus = getStatusInfo(agent);
-          const newPause = getPauseInfo(agent);
-          statusTd.innerHTML = `<span class="pill ${newStatus.css}">${newStatus.text}</span>`;
-          pauseTd.innerHTML = `<span class="pill ${newPause.css}">${newPause.text}</span>`;
+const newPause = getPauseInfo(agent);
+statusTd.innerHTML = `<span class="pill ${newStatus.css}">${newStatus.text}</span>`;
+pauseTd.innerHTML = `<span class="pill ${newPause.css}">${newPause.text}</span>`;
 
-          pauseBtn.disabled = !agent.logged;
-          pauseBtn.textContent = agent.paused ? 'Reprendre' : 'Pause';
-          loginBtn.textContent = agent.logged ? 'Logout' : 'Login';
-          setLoginButtonStyle(loginBtn, agent.logged);
+pauseBtn.disabled = !agent.logged;
+pauseBtn.textContent = agent.paused ? 'Reprendre' : 'Pause';
+loginBtn.textContent = agent.logged ? 'Logout' : 'Login';
+setLoginButtonStyle(loginBtn, agent.logged);
+
+updateHeaderStats();
+flashUpdating();
+
         } catch (err) {
           console.error('[Superviseur] Erreur login/logout', err);
           alert(
