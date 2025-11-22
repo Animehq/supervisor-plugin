@@ -32,6 +32,7 @@ const statusEl = document.getElementById('status');
 const containerEl = document.getElementById('queues-container');
 const compactToggleEl = document.getElementById('compact-toggle');
 const themeToggleEl = document.getElementById('theme-toggle');
+const refreshBtn = document.getElementById('refresh-btn');
 
 // Auto-refresh (optimisé) : toutes les 15s
 const AUTO_REFRESH_INTERVAL_MS = 15000;
@@ -504,15 +505,6 @@ function getStatusInfo(agent) {
   return { text: 'Connecté', css: 'pill--online' };
 }
 
-function getPauseInfo(agent) {
-  if (!agent.logged) {
-    return { text: '—', css: 'pill--pause-off' };
-  }
-  if (agent.paused) {
-    return { text: 'Oui', css: 'pill--pause-yes' };
-  }
-  return { text: 'Non', css: 'pill--pause-no' };
-}
 
 function computeQueuePresence(rows) {
   let total = rows.length;
@@ -580,18 +572,13 @@ function syncAgentDom(agent) {
 
   rows.forEach((row) => {
     const statusTd = row.querySelector('.col-status');
-    const pauseTd = row.querySelector('.col-pause');
     const pauseBtn = row.querySelector('.agent-pause-btn');
     const loginBtn = row.querySelector('.agent-login-btn');
 
     const statusInfo = getStatusInfo(agent);
-    const pauseInfo = getPauseInfo(agent);
 
     if (statusTd) {
       statusTd.innerHTML = `<span class="pill ${statusInfo.css}">${statusInfo.text}</span>`;
-    }
-    if (pauseTd) {
-      pauseTd.innerHTML = `<span class="pill ${pauseInfo.css}">${pauseInfo.text}</span>`;
     }
 
     if (pauseBtn) {
@@ -856,7 +843,6 @@ function renderQueues(groups, api, queuesMeta) {
         <th>NOM</th>
         <th>EXTENSION</th>
         <th>ÉTAT</th>
-        <th>PAUSE</th>
         <th>SUPERVISION</th>
         <th>TRANSFERT</th>
         <th class="col-actions">ACTIONS</th>
@@ -917,16 +903,12 @@ function renderQueues(groups, api, queuesMeta) {
       }
 
       const statusInfo = getStatusInfo(agent);
-      const pauseInfo = getPauseInfo(agent);
 
       tr.innerHTML = `
         <td>${agent.name}</td>
         <td>${agent.extension || '—'}</td>
         <td class="col-status">
           <span class="pill ${statusInfo.css}">${statusInfo.text}</span>
-        </td>
-        <td class="col-pause">
-          <span class="pill ${pauseInfo.css}">${pauseInfo.text}</span>
         </td>
         <td class="col-supervision"></td>
         <td class="col-transfer"></td>
@@ -1491,6 +1473,22 @@ function connectRealtime(baseUrl, token, api) {
 // -------------------------------------------------------------------
 
 function startAutoRefresh(api) {
+
+  if (refreshBtn) {
+  refreshBtn.addEventListener('click', async () => {
+    try {
+      refreshBtn.classList.add('spin');
+      setStatus("Rafraîchissement…", "info");
+      await loadData(state.api, { silent: true });
+      setStatus("Données mises à jour.", "success");
+    } catch (err) {
+      console.error("Erreur refresh manuel :", err);
+      setStatus("Erreur refresh.", "error");
+    } finally {
+      setTimeout(() => refreshBtn.classList.remove('spin'), 400);
+    }
+  });
+}
   if (autoRefreshTimer) return;
 
   autoRefreshTimer = setInterval(async () => {

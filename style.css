@@ -709,3 +709,96 @@ body.is-dark .transfer-control .btn--secondary {
   background-color: #020617;
   border-color: #1f2937;
 }
+
+.refresh-btn {
+  font-size: 20px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  width: 34px;
+  height: 34px;
+  cursor: pointer;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: 0.2s;
+}
+
+.refresh-btn:hover {
+  background: var(--hover);
+}
+
+.refresh-btn:active {
+  transform: rotate(180deg);
+}
+
+.refresh-btn.spin {
+  animation: spin 0.4s linear;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.page-header-right {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.5rem;
+}
+
+/* Ligne refresh + status alignée à droite */
+.header-tools {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+/* Garde les switches en colonne comme avant */
+.header-switches {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.4rem;
+}
+
+/* Bouton refresh rond */
+.refresh-btn {
+  font-size: 18px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  width: 34px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text);
+  cursor: pointer;
+  transition: 0.2s;
+}
+
+.refresh-btn:hover {
+  background: var(--hover);
+}
+
+.refresh-bar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end; /* pousse ⟳ + statut à droite */
+  gap: 0.6rem;
+  margin: 0 0 0.75rem 0;     /* petit espace avec la 1ère file */
+}
+
+.agent-pause-btn {
+  min-width: 85px;   /* ajuste si tu veux plus large ou plus serré */
+  text-align: center;
+}
+
+/* Empêcher le décalage du bouton Login/Logout */
+.agent-login-btn {
+  min-width: 85px;     /* même largeur que Pause/Reprendre pour un tableau propre */
+  text-align: center;
+}
