@@ -604,6 +604,11 @@ function syncAgentDom(agent) {
       loginBtn.textContent = agent.logged ? 'Logout' : 'Login';
       setLoginButtonStyle(loginBtn, agent.logged);
     }
+const supervisionButtons = row.querySelectorAll('.col-supervision .btn');
+    supervisionButtons.forEach((btn) => {
+      btn.disabled = !agent.logged;
+    });
+    
   });
 }
 
