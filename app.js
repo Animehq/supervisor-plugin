@@ -659,7 +659,7 @@ async function setUserMobileForward(userUuid, number, api) {
 
   const body = enabled
     ? { enabled: true, destination: trimmed }
-    : { enabled: false };
+    : { enabled: false, destination: null }; 
 
   // ✅ API confd correcte : /forwards/unconditional
   await api(
@@ -1375,11 +1375,34 @@ async function loadData(api, { silent = false } = {}) {
     }
 
     // Renvois inconditionnels actuels (enabled + numéro)
-    state.userForwards = await loadUserForwards(api, userUuidSet);
+state.userForwards = await loadUserForwards(api, userUuidSet);
 
-    state.queueStats = new Map();
+// Stats files 9h–18h depuis call-logd
+const queueStatsMap = new Map();
 
-    renderQueues(groups, api, queuesMeta);
+if (queuesStatsRaw) {
+  const items = Array.isArray(queuesStatsRaw.items)
+    ? queuesStatsRaw.items
+    : Array.isArray(queuesStatsRaw)
+    ? queuesStatsRaw
+    : [];
+
+  items.forEach((s) => {
+    const qid = s.queue_id ?? s.queueId ?? s.id;
+    if (!qid) return;
+
+    queueStatsMap.set(qid, {
+      total_calls:
+        s.total_calls ?? s.received ?? s.calls ?? 0,
+      answered_calls: s.answered_calls ?? s.answered ?? 0,
+      missed_calls: s.missed_calls ?? s.missed ?? 0,
+    });
+  });
+}
+
+state.queueStats = queueStatsMap;
+
+renderQueues(groups, api, queuesMeta);
 
     if (!silent) {
       setStatus('Agents chargés.', 'success');
