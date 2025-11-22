@@ -200,7 +200,19 @@ function createApiClient(baseUrl, token) {
       const text = await res.text().catch(() => '');
       console.error('[Superviseur] Erreur API', res.status, url, text);
 
+      // 🔐 Sécurité token expiré côté API REST
       if (res.status === 401 || res.status === 403) {
+        const lower = (text || '').toLowerCase();
+
+        // Beaucoup de stacks Wazo renvoient "expired" ou "token" dans le message
+        if (lower.includes('expired') || lower.includes('token')) {
+          setStatus('Session expirée — rechargement…', 'error');
+          setTimeout(() => {
+            window.location.reload();
+          }, 800);
+          return; // on stoppe ici
+        }
+
         throw new Error(
           `Accès refusé (${res.status}). Vérifiez les droits Call Center / Agents.`
         );
@@ -1452,14 +1464,29 @@ function connectRealtime(baseUrl, token, api) {
     }
   };
 
-  ws.onclose = (ev) => {
-    console.warn('[Superviseur] WebSocket fermé', ev.code, ev.reason);
+ws.onclose = (ev) => {
+  console.warn('[Superviseur] WebSocket fermé', ev.code, ev.reason);
+
+  // 🔥 Token expiré → rechargement automatique
+  if (ev.code === 4003) {
+    console.error('[Superviseur] Token expiré → rechargement de la page...');
+    setStatus('Session expirée — rechargement…', 'error');
+
     setTimeout(() => {
-      if (state.api) {
-        state.websocket = connectRealtime(baseUrl, token, api);
-      }
-    }, 1200);
-  };
+      window.location.reload();
+    }, 800);
+
+    return;
+  }
+
+  // Reconnexion automatique (déco réseau etc.)
+  setTimeout(() => {
+    if (state.api) {
+      state.websocket = connectRealtime(baseUrl, token, api);
+    }
+  }, 1200);
+};
+
 
   ws.onerror = (err) => {
     console.error('[Superviseur] WebSocket error', err);
