@@ -1,9 +1,28 @@
 // app.js
 // ===================================================================
 // Superviseur Agents – affichage par files d’attente + actions + temps réel
+//   + Join / Spy / Whisper via calld
+//   + Transfert mobile via callforward inconditionnel
+//   + Stats files sur la journée (9h–18h) via call-logd
 // ===================================================================
 
 import { App } from 'https://cdn.jsdelivr.net/npm/@wazo/euc-plugins-sdk@latest/lib/esm/app.js';
+
+// -------------------------------------------------------------------
+// Config supervision
+// -------------------------------------------------------------------
+
+// Préfixes de supervision (à adapter à ton dialplan)
+// Exemple : *301<ext> = join, *302<ext> = spy, *303<ext> = whisper
+const SUPERVISION_PREFIXES = {
+  join: '*301',
+  spy: '*302',
+  whisper: '*303',
+};
+
+// Fenêtre de stats journalières (9h–18h)
+const STATS_START_HOUR = 9;
+const STATS_END_HOUR = 18;
 
 // -------------------------------------------------------------------
 // Références DOM & état global
@@ -14,12 +33,19 @@ const containerEl = document.getElementById('queues-container');
 const compactToggleEl = document.getElementById('compact-toggle');
 const themeToggleEl = document.getElementById('theme-toggle');
 
+// Auto-refresh (optimisé) : toutes les 15s
+const AUTO_REFRESH_INTERVAL_MS = 15000;
+let autoRefreshTimer = null;
+let isAutoRefreshing = false;
+
 const state = {
   api: null,
   baseUrl: null,
   token: null,
   groups: new Map(),
   queuesMeta: new Map(),
+  queueStats: new Map(), // 👈 stats call-logd par queue_id
+  userForwards: new Map(), // 👈 renvoi inconditionnel par userUuid
   websocket: null,
   realtimeReloadScheduled: false,
 };
@@ -29,15 +55,22 @@ const uiState = {
   dark: true,    // dark actif par défaut
 };
 
+// -------------------------------------------------------------------
+// UI : toggles compact / thème (version corrigée avec .switch-label)
+// -------------------------------------------------------------------
+
 function syncCompactUI() {
   const isCompact = uiState.compact;
   document.body.classList.toggle('is-compact', isCompact);
 
   if (compactToggleEl) {
     compactToggleEl.classList.toggle('toggle--active', isCompact);
-    const label = compactToggleEl.querySelector('.toggle-label');
+    compactToggleEl.setAttribute('aria-pressed', String(isCompact));
+
+    const row = compactToggleEl.closest('.switch-row');
+    const label = row ? row.querySelector('.switch-label') : null;
     if (label) {
-      // On affiche l’action disponible (comme sur ton screen)
+      // On affiche l’action possible (comme sur ton screen)
       label.textContent = isCompact ? 'Mode normal' : 'Mode compact';
     }
   }
@@ -49,12 +82,12 @@ function syncThemeUI() {
 
   if (themeToggleEl) {
     themeToggleEl.classList.toggle('toggle--active', isDark);
-    const icon = themeToggleEl.querySelector('.toggle-icon');
-    const label = themeToggleEl.querySelector('.toggle-label');
+    themeToggleEl.setAttribute('aria-pressed', String(isDark));
 
-    if (icon) icon.textContent = isDark ? '☀️' : '🌙';
+    const row = themeToggleEl.closest('.switch-row');
+    const label = row ? row.querySelector('.switch-label') : null;
     if (label) {
-      // Là aussi on affiche l’action : passer en clair / en sombre
+      // On affiche l’action possible (passer en clair / en sombre)
       label.textContent = isDark ? 'Thème clair' : 'Thème sombre';
     }
   }
@@ -83,11 +116,8 @@ syncThemeUI();
 // UI helpers
 // -------------------------------------------------------------------
 
-
-
 function setStatus(message, type = 'info') {
   if (!statusEl) {
-    // pas de warning, on sort juste
     return;
   }
   statusEl.textContent = message || '';
@@ -96,10 +126,7 @@ function setStatus(message, type = 'info') {
 }
 
 function clearContainer() {
-  if (!containerEl) {
-    // pas de warning
-    return;
-  }
+  if (!containerEl) return;
   containerEl.innerHTML = '';
 }
 
@@ -129,15 +156,19 @@ function createActionButton(label, variant = 'secondary') {
   return btn;
 }
 
-// Style spécifique pour le bouton Login/Logout
 function setLoginButtonStyle(btn, isLogged) {
-  btn.className = 'btn btn--sm ' + (isLogged ? 'btn--danger' : 'btn--primary');
+  btn.classList.remove('btn--primary', 'btn--danger');
+  btn.classList.add('btn', 'btn--sm');
+
+  if (isLogged) {
+    btn.classList.add('btn--danger');
+  } else {
+    btn.classList.add('btn--primary');
+  }
 }
 
-
-
 // -------------------------------------------------------------------
-// Client API Wazo générique
+// Client API Wazo générique (contexte E-UC commercial)
 // -------------------------------------------------------------------
 
 function createApiClient(baseUrl, token) {
@@ -193,11 +224,7 @@ function queueColorFromName(name) {
   for (let i = 0; i < name.length; i++) {
     hash = name.charCodeAt(i) + ((hash << 5) - hash);
   }
-
-  // Hue stable (0–360°)
   const hue = Math.abs(hash) % 360;
-
-  // Couleurs pro (saturation/brightness modérés)
   return `hsl(${hue}, 65%, 55%)`;
 }
 
@@ -213,10 +240,11 @@ function normalizeCollection(raw) {
   return [];
 }
 
-// users → map uuid -> { name, extension }
-function buildUsersByUuidMap(usersRaw) {
+// users → maps
+function buildUsersMaps(usersRaw) {
   const users = normalizeCollection(usersRaw);
-  const map = new Map();
+  const usersByUuid = new Map();
+  const usersByExt = new Map();
 
   users.forEach((user) => {
     const displayName =
@@ -242,17 +270,17 @@ function buildUsersByUuidMap(usersRaw) {
       }
     }
 
-    const key = user.uuid || user.id;
-    if (key) {
-      map.set(key, {
-        name: displayName,
-        extension,
-      });
+    const uuid = user.uuid || user.id || null;
+    if (uuid) {
+      usersByUuid.set(uuid, { name: displayName, extension, uuid });
+    }
+    if (extension) {
+      usersByExt.set(extension, { name: displayName, uuid: uuid || null });
     }
   });
 
-  console.log('[Superviseur] Map usersByUuid', map);
-  return map;
+  console.log('[Superviseur] maps usersByUuid/usersByExt', usersByUuid, usersByExt);
+  return { usersByUuid, usersByExt };
 }
 
 // agents → maps (par extension / id / uuid)
@@ -344,7 +372,7 @@ async function resolveAgentLoginTarget(agent, api) {
 // queues → regroupement agents par file d’attente + meta queue
 function groupAgentsByQueue(queuesRaw, usersRaw, agentsRaw) {
   const queues = normalizeCollection(queuesRaw);
-  const usersByUuid = buildUsersByUuidMap(usersRaw);
+  const { usersByUuid, usersByExt } = buildUsersMaps(usersRaw);
   const { byExt, byId, byUuid } = buildAgentsMaps(agentsRaw);
 
   const groups = new Map(); // queueName -> rows[]
@@ -378,6 +406,7 @@ function groupAgentsByQueue(queuesRaw, usersRaw, agentsRaw) {
       let agentInfo = null;
       let name = null;
       let extension = null;
+      let userUuid = null;
 
       if (kind === 'user') {
         const key = ref.uuid || ref.id;
@@ -391,6 +420,7 @@ function groupAgentsByQueue(queuesRaw, usersRaw, agentsRaw) {
         } else {
           name = userInfo.name;
           extension = userInfo.extension || null;
+          userUuid = key || null;
           if (extension) {
             agentInfo = byExt.get(String(extension)) || null;
           }
@@ -413,14 +443,10 @@ function groupAgentsByQueue(queuesRaw, usersRaw, agentsRaw) {
           extension = agentInfo.extension || null;
 
           if (extension) {
-            for (const [, uInfo] of usersByUuid) {
-              if (
-                uInfo.extension &&
-                String(uInfo.extension) === String(extension)
-              ) {
-                name = uInfo.name;
-                break;
-              }
+            const extInfo = usersByExt.get(String(extension));
+            if (extInfo) {
+              if (!name) name = extInfo.name;
+              userUuid = extInfo.uuid || null;
             }
           }
         }
@@ -453,6 +479,7 @@ function groupAgentsByQueue(queuesRaw, usersRaw, agentsRaw) {
         paused: agentInfo?.paused ?? false,
         queueId,
         queueLabel,
+        userUuid, // 👈 pour transfert mobile
       };
 
       qGroup.push(row);
@@ -479,7 +506,7 @@ function getStatusInfo(agent) {
 
 function getPauseInfo(agent) {
   if (!agent.logged) {
-    return { text: '—', css: 'pill--pause-no' };
+    return { text: '—', css: 'pill--pause-off' };
   }
   if (agent.paused) {
     return { text: 'Oui', css: 'pill--pause-yes' };
@@ -487,7 +514,7 @@ function getPauseInfo(agent) {
   return { text: 'Non', css: 'pill--pause-no' };
 }
 
-function computeQueueStats(rows) {
+function computeQueuePresence(rows) {
   let total = rows.length;
   let logged = 0;
   let paused = 0;
@@ -506,9 +533,6 @@ function computeQueueStats(rows) {
     logged,
     paused,
     offline,
-    waiting: 0,
-    inCall: 0,
-    missed: 0,
   };
 }
 
@@ -546,6 +570,147 @@ async function moveAgentBetweenQueues(agentId, fromQueueId, toQueueId, api) {
   }
 }
 
+// Synchronise toutes les lignes DOM d'un même agent (cas : agent dans plusieurs files)
+function syncAgentDom(agent) {
+  if (!agent || !agent.id || !containerEl) return;
+
+  const rows = containerEl.querySelectorAll(
+    `tr[data-agent-id="${agent.id}"]`
+  );
+
+  rows.forEach((row) => {
+    const statusTd = row.querySelector('.col-status');
+    const pauseTd = row.querySelector('.col-pause');
+    const pauseBtn = row.querySelector('.agent-pause-btn');
+    const loginBtn = row.querySelector('.agent-login-btn');
+
+    const statusInfo = getStatusInfo(agent);
+    const pauseInfo = getPauseInfo(agent);
+
+    if (statusTd) {
+      statusTd.innerHTML = `<span class="pill ${statusInfo.css}">${statusInfo.text}</span>`;
+    }
+    if (pauseTd) {
+      pauseTd.innerHTML = `<span class="pill ${pauseInfo.css}">${pauseInfo.text}</span>`;
+    }
+
+    if (pauseBtn) {
+      pauseBtn.disabled = !agent.logged;
+      pauseBtn.textContent = agent.paused ? 'Reprendre' : 'Pause';
+      pauseBtn.classList.toggle('btn--pause-active', agent.logged && agent.paused);
+      pauseBtn.classList.toggle('btn--pause-disabled', !agent.logged);
+    }
+
+    if (loginBtn) {
+      loginBtn.textContent = agent.logged ? 'Logout' : 'Login';
+      setLoginButtonStyle(loginBtn, agent.logged);
+    }
+  });
+}
+
+// -------------------------------------------------------------------
+// Supervision et transfert mobile
+// -------------------------------------------------------------------
+
+async function superviseAgentCall(mode, agent, api) {
+  const prefix = SUPERVISION_PREFIXES[mode];
+  if (!prefix) {
+    alert(`Préfixe supervision non configuré pour le mode ${mode}.`);
+    return;
+  }
+  const ext = agent.extension || agent.number;
+  if (!ext) {
+    alert(
+      `Impossible de déterminer l'extension pour l'agent ${agent.name} (id=${agent.id}).`
+    );
+    return;
+  }
+
+  const target = `${prefix}${ext}`;
+  try {
+    const label =
+      mode === 'join' ? 'Join' : mode === 'spy' ? 'Spy' : 'Whisper';
+    setStatus(`${label} sur ${agent.name} (${ext})…`, 'info');
+
+    await api('/api/calld/1.0/users/me/calls', {
+      method: 'POST',
+      body: { extension: target },
+    });
+
+    setStatus('Commande de supervision envoyée.', 'success');
+  } catch (err) {
+    console.error('[Superviseur] Erreur superviseAgentCall', err);
+    alert(
+      `Erreur lors de la supervision (${mode}) de cet agent.\n` +
+        (err.message || '')
+    );
+    setStatus('Erreur lors de la supervision.', 'error');
+  }
+}
+
+// TRANSFERT MOBILE (renvoi inconditionnel correct via confd)
+async function setUserMobileForward(userUuid, number, api) {
+  if (!userUuid) {
+    throw new Error('userUuid manquant pour configurer le transfert.');
+  }
+
+  const trimmed = (number || '').trim();
+  const enabled = !!trimmed;
+
+  const body = enabled
+    ? { enabled: true, destination: trimmed }
+    : { enabled: false };
+
+  // ✅ API confd correcte : /forwards/unconditional
+  await api(
+    `/api/confd/1.1/users/${encodeURIComponent(
+      userUuid
+    )}/forwards/unconditional`,
+    {
+      method: 'PUT',
+      body,
+    }
+  );
+}
+
+
+// Charge les renvois inconditionnels pour une liste de users
+async function loadUserForwards(api, userUuidSet) {
+  const forwardsMap = new Map();
+  const promises = [];
+
+  for (const userUuid of userUuidSet) {
+    const p = api(
+      `/api/confd/1.1/users/${encodeURIComponent(
+        userUuid
+      )}/forwards/unconditional`,   // 👈 même chemin que setUserMobileForward
+      { method: 'GET' }
+    )
+      .then((data) => {
+        if (data && typeof data.enabled === 'boolean') {
+          forwardsMap.set(userUuid, {
+            enabled: !!data.enabled,
+            destination: data.destination || '',
+          });
+        }
+      })
+      .catch((err) => {
+        console.warn(
+          '[Superviseur] Impossible de charger le renvoi pour',
+          userUuid,
+          err
+        );
+      });
+
+    promises.push(p);
+  }
+
+  await Promise.all(promises);
+  return forwardsMap;
+}
+
+
+
 // -------------------------------------------------------------------
 // Rendu des files + actions
 // -------------------------------------------------------------------
@@ -560,100 +725,121 @@ function renderQueues(groups, api, queuesMeta) {
   }
 
   const SUPPORT_IT_PATTERN = /support\s*it/i;
+  const PARKING_PATTERN = /(sans\s*file|hors\s*call\s*center|parking)/i;
+  const SAV_PATTERN = /^sav\b/i;
 
-  const orderedKeys = Array.from(groups.keys())
-    .filter((name) => name !== "Sans file d'attente")
-    .sort((a, b) => {
-      const score = (name) => (SUPPORT_IT_PATTERN.test(name) ? 0 : 1);
-      const sa = score(a);
-      const sb = score(b);
-      if (sa !== sb) return sa - sb;
-      return a.localeCompare(b, 'fr');
-    });
+  const allNames = Array.from(groups.keys());
 
-  orderedKeys.forEach((queueName) => {
-    const rows = [...(groups.get(queueName) || [])].sort((a, b) => {
-      const nameA = (a.name || '').toLocaleLowerCase('fr-FR');
-      const nameB = (b.name || '').toLocaleLowerCase('fr-FR');
+  // File Support IT (prioritaire)
+  const supportName = allNames.find((n) => SUPPORT_IT_PATTERN.test(n));
 
-      if (nameA === nameB) {
-        const extA = a.extension || '';
-        const extB = b.extension || '';
-        return extA.localeCompare(extB, 'fr', { numeric: true });
-      }
+  // File "parking" (hors call center) détectée par motif, plus besoin du nom exact
+  const parkingName = allNames.find((n) => PARKING_PATTERN.test(n));
 
-      return nameA.localeCompare(nameB, 'fr', { sensitivity: 'base' });
-    });
+  // Files SAV (bureautique, conso, etc.)
+  const savNames = allNames.filter((n) => SAV_PATTERN.test(n));
 
+  // Autres files
+  const otherNames = allNames.filter(
+    (n) =>
+      n !== supportName &&
+      n !== parkingName &&
+      !savNames.includes(n)
+  );
+
+  // Petite fonction pour construire une carte de file
+    const buildQueueCard = (queueName, rows) => {
     const queueMeta = queuesMeta.get(queueName) || {};
-    let queueId = queueMeta.id || null;
-    let stats = computeQueueStats(rows);
+    const queueId = queueMeta.id || null;
 
-const section = document.createElement('section');
-section.className = 'queue-card';
+    const section = document.createElement('section');
+    section.className = 'queue-card';
 
-// Couleur personnalisée par file
-const color = queueColorFromName(queueName);
-section.style.borderLeft = `4px solid ${color}`;
+    const color = queueColorFromName(queueName);
+    section.style.borderLeft = `4px solid ${color}`;
+    if (document.body.classList.contains('is-dark')) {
+      section.style.boxShadow = `0 0 0 1px ${color}22, var(--shadow-card)`;
+    }
 
-// Option : halo léger autour de la carte en dark mode
-if (document.body.classList.contains('is-dark')) {
-  section.style.boxShadow = `0 0 0 1px ${color}22, var(--shadow-card)`;
-}
+    const isSupport = SUPPORT_IT_PATTERN.test(queueName);
+    const isParking = PARKING_PATTERN.test(queueName);
 
-if (SUPPORT_IT_PATTERN.test(queueName)) {
-  section.classList.add('queue-card--priority');
-}
+    if (isSupport) {
+      section.classList.add('queue-card--priority');
+    }
 
-section.dataset.queueId = queueId || '';
+    section.dataset.queueId = queueId || '';
+
 
     const header = document.createElement('header');
     header.className = 'queue-card__header';
 
+    const titleWrapper = document.createElement('div');
     const title = document.createElement('h2');
     title.textContent = queueName;
+    titleWrapper.appendChild(title);
 
     const meta = document.createElement('div');
     meta.className = 'queue-card__meta';
 
     const badgeAgents = document.createElement('span');
-badgeAgents.className = 'badge badge--light-blue';
+    badgeAgents.className = 'badge badge--light-blue';
 
-const badgePaused = document.createElement('span');
-badgePaused.className = 'badge badge--amber';
+    const badgePaused = document.createElement('span');
+    badgePaused.className = 'badge badge--amber';
 
-const badgeOffline = document.createElement('span');
-badgeOffline.className = 'badge badge--muted';
+    const badgeOffline = document.createElement('span');
+    badgeOffline.className = 'badge badge--muted';
 
-const badgeCalls = document.createElement('span');
-badgeCalls.className = 'badge badge--muted';
+    const badgeCalls = document.createElement('span');
+    badgeCalls.className = 'badge badge--muted';
 
-// Recalcule les stats à partir de `rows` et met à jour les badges
-const updateHeaderStats = () => {
-  stats = computeQueueStats(rows);
-  badgeAgents.textContent = `${stats.logged}/${stats.totalAgents} connectés`;
-  badgePaused.textContent = `${stats.paused} en pause`;
-  badgeOffline.textContent = `${stats.offline} off`;
-  badgeCalls.textContent = `Attente: ${stats.waiting} · En cours: ${stats.inCall} · Manqués: ${stats.missed}`;
+    const updateHeaderStats = () => {
+      const presence = computeQueuePresence(rows);
+      badgeAgents.textContent = `${presence.logged}/${presence.totalAgents} connectés`;
+      badgePaused.textContent = `${presence.paused} en pause`;
+      badgeOffline.textContent = `${presence.offline} off`;
 
-};
+      const callStats = state.queueStats.get(queueId);
+      if (callStats) {
+        const received =
+          callStats.total_calls ??
+          callStats.received ??
+          callStats.calls ??
+          0;
+        const answered =
+          callStats.answered_calls ?? callStats.answered ?? 0;
+        const missed =
+          callStats.missed_calls ?? callStats.missed ?? 0;
+        badgeCalls.textContent = `Reçus: ${received} · Répondus: ${answered} · Manqués: ${missed} (9h–18h)`;
+      } else {
+        badgeCalls.textContent = 'Statistiques 9h–18h indisponibles';
+      }
+    };
 
-// Petite animation visuelle quand la file est mise à jour
-const flashUpdating = () => {
-  section.classList.add('queue-card--updating');
-  setTimeout(() => section.classList.remove('queue-card--updating'), 300);
-};
+    const flashUpdating = () => {
+      section.classList.add('queue-card--updating');
+      setTimeout(() => section.classList.remove('queue-card--updating'), 300);
+    };
 
-// Initialisation des badges à partir de l’état courant
-updateHeaderStats();
-
+    updateHeaderStats();
 
     meta.appendChild(badgeAgents);
     meta.appendChild(badgePaused);
     meta.appendChild(badgeOffline);
     meta.appendChild(badgeCalls);
 
-    header.appendChild(title);
+    // 🔍 Si c'est "Sans file d'attente", on ajoute une barre de recherche
+     let searchInput = null;
+    if (isParking) {
+      searchInput = document.createElement('input');
+      searchInput.type = 'search';
+      searchInput.placeholder = 'Rechercher un utilisateur…';
+      searchInput.className = 'queue-search-input';
+      titleWrapper.appendChild(searchInput);
+    }
+
+    header.appendChild(titleWrapper);
     header.appendChild(meta);
     section.appendChild(header);
 
@@ -672,6 +858,7 @@ updateHeaderStats();
         <th>ÉTAT</th>
         <th>PAUSE</th>
         <th>SUPERVISION</th>
+        <th>TRANSFERT</th>
         <th class="col-actions">ACTIONS</th>
       </tr>
     `;
@@ -706,8 +893,28 @@ updateHeaderStats();
       }
     });
 
-    rows.forEach((agent) => {
+    // Tri des agents dans la file
+    const sortedRows = [...rows].sort((a, b) => {
+      const nameA = (a.name || '').toLocaleLowerCase('fr-FR');
+      const nameB = (b.name || '').toLocaleLowerCase('fr-FR');
+
+      if (nameA === nameB) {
+        const extA = a.extension || '';
+        const extB = b.extension || '';
+        return extA.localeCompare(extB, 'fr', { numeric: true });
+      }
+
+      return nameA.localeCompare(nameB, 'fr', { sensitivity: 'base' });
+    });
+
+    sortedRows.forEach((agent) => {
       const tr = document.createElement('tr');
+      if (agent.id != null) {
+        tr.dataset.agentId = String(agent.id);
+      }
+      if (agent.number || agent.extension) {
+        tr.dataset.agentNumber = agent.number || agent.extension;
+      }
 
       const statusInfo = getStatusInfo(agent);
       const pauseInfo = getPauseInfo(agent);
@@ -722,12 +929,12 @@ updateHeaderStats();
           <span class="pill ${pauseInfo.css}">${pauseInfo.text}</span>
         </td>
         <td class="col-supervision"></td>
+        <td class="col-transfer"></td>
         <td class="col-actions"></td>
       `;
 
-      const statusTd = tr.querySelector('.col-status');
-      const pauseTd = tr.querySelector('.col-pause');
       const supervisionCell = tr.querySelector('.col-supervision');
+      const transferCell = tr.querySelector('.col-transfer');
       const actionsCell = tr.querySelector('.col-actions');
 
       tr.dataset.agentId = agent.id || '';
@@ -753,7 +960,7 @@ updateHeaderStats();
         });
       }
 
-      // Si pas d'id agent (pas associé), actions désactivées
+      // Si pas d'id agent → actions désactivées
       if (!agent.id) {
         const pauseBtn = createActionButton('Pause', 'secondary');
         const loginBtn = createActionButton('Login', 'primary');
@@ -765,36 +972,135 @@ updateHeaderStats();
         return;
       }
 
-      // SUPERVISION (Join / Spy / Whisper) – hooks à câbler sur calld
+      // SUPERVISION (Join / Spy / Whisper)
       const joinBtn = createActionButton('Join', 'secondary');
       const spyBtn = createActionButton('Spy', 'secondary');
       const whisperBtn = createActionButton('Whisper', 'secondary');
 
-      joinBtn.addEventListener('click', () => {
-        console.warn('[Superviseur] TODO join() à câbler sur calld pour', agent);
-        alert("Join : à câbler sur l'API calld avec le call_id de l'agent.");
+      [joinBtn, spyBtn, whisperBtn].forEach((btn) => {
+        btn.disabled = !agent.logged;
       });
 
-      spyBtn.addEventListener('click', () => {
-        console.warn('[Superviseur] TODO spy() à câbler sur calld pour', agent);
-        alert("Spy : à câbler sur l'API calld pour écouter l'appel.");
-      });
-
-      whisperBtn.addEventListener('click', () => {
-        console.warn('[Superviseur] TODO whisper() à câbler sur calld pour', agent);
-        alert("Whisper : à câbler sur l'API calld pour chuchoter.");
-      });
+      joinBtn.addEventListener('click', () =>
+        superviseAgentCall('join', agent, api)
+      );
+      spyBtn.addEventListener('click', () =>
+        superviseAgentCall('spy', agent, api)
+      );
+      whisperBtn.addEventListener('click', () =>
+        superviseAgentCall('whisper', agent, api)
+      );
 
       supervisionCell.appendChild(joinBtn);
       supervisionCell.appendChild(spyBtn);
       supervisionCell.appendChild(whisperBtn);
 
-      // BOUTON PAUSE / REPRENDRE (by-number)
+                  // TRANSFERT MOBILE (renvoi inconditionnel, 1 seul bouton ON/OFF)
+      if (agent.userUuid) {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'transfer-control';
+
+        const input = document.createElement('input');
+        input.type = 'tel';
+        input.placeholder = 'Portable…';
+        input.className = 'transfer-input';
+
+        const toggleBtn = createActionButton('ON', 'primary');
+
+        // État initial basé sur state.userForwards (si disponible)
+        let forwardEnabled = false; // true = renvoi actif
+        let forwardNumber = '';
+
+        if (state.userForwards && state.userForwards.has(agent.userUuid)) {
+          const fw = state.userForwards.get(agent.userUuid);
+          forwardEnabled = !!fw.enabled;
+          forwardNumber = fw.destination || '';
+        }
+
+        const syncForwardUi = () => {
+          input.value = forwardNumber || '';
+
+          toggleBtn.classList.remove('btn--primary', 'btn--danger');
+
+          if (forwardEnabled) {
+            // Renvoi actif -> OFF rouge
+            toggleBtn.textContent = 'OFF';
+            toggleBtn.classList.add('btn--danger');
+          } else {
+            // Pas de renvoi -> ON vert
+            toggleBtn.textContent = 'ON';
+            toggleBtn.classList.add('btn--primary');
+          }
+        };
+
+        syncForwardUi();
+
+        toggleBtn.addEventListener('click', async () => {
+          if (!forwardEnabled) {
+            // Activer le renvoi
+            const num = input.value.trim();
+            if (!num) {
+              alert('Merci de renseigner un numéro de portable.');
+              return;
+            }
+            try {
+              setStatus(
+                `Activation du transfert vers ${num} pour ${agent.name}…`,
+                'info'
+              );
+              await setUserMobileForward(agent.userUuid, num, api);
+              forwardEnabled = true;
+              forwardNumber = num;
+              syncForwardUi();
+              setStatus('Transfert activé.', 'success');
+            } catch (err) {
+              console.error('[Superviseur] Erreur transfert mobile ON', err);
+              alert(
+                'Erreur lors de l’activation du transfert.\n' +
+                  (err.message || '')
+              );
+              setStatus('Erreur transfert mobile.', 'error');
+            }
+          } else {
+            // Désactiver le renvoi
+            try {
+              setStatus(
+                `Désactivation du transfert mobile pour ${agent.name}…`,
+                'info'
+              );
+              await setUserMobileForward(agent.userUuid, '', api);
+              forwardEnabled = false;
+              forwardNumber = '';
+              syncForwardUi();
+              setStatus('Transfert désactivé.', 'success');
+            } catch (err) {
+              console.error('[Superviseur] Erreur transfert mobile OFF', err);
+              alert(
+                'Erreur lors de la désactivation du transfert.\n' +
+                  (err.message || '')
+              );
+              setStatus('Erreur transfert mobile.', 'error');
+            }
+          }
+        });
+
+        wrapper.appendChild(input);
+        wrapper.appendChild(toggleBtn);
+        transferCell.appendChild(wrapper);
+      } else {
+        transferCell.textContent = '—';
+      }
+
+
+
+
+      // BOUTON PAUSE / REPRENDRE
       const pauseBtn = createActionButton(
         agent.paused ? 'Reprendre' : 'Pause',
         'secondary'
       );
       pauseBtn.disabled = !agent.logged;
+      pauseBtn.classList.add('agent-pause-btn');
 
       pauseBtn.addEventListener('click', async () => {
         try {
@@ -823,15 +1129,9 @@ updateHeaderStats();
 
           agent.paused = !agent.paused;
 
-          const newStatus = getStatusInfo(agent);
-          const newPause = getPauseInfo(agent);
-          statusTd.innerHTML = `<span class="pill ${newStatus.css}">${newStatus.text}</span>`;
-          pauseTd.innerHTML = `<span class="pill ${newPause.css}">${newPause.text}</span>`;
-
-          pauseBtn.textContent = agent.paused ? 'Reprendre' : 'Pause';
-updateHeaderStats();
-flashUpdating();
-
+          syncAgentDom(agent);
+          updateHeaderStats();
+          flashUpdating();
         } catch (err) {
           console.error('[Superviseur] Erreur pause/reprendre', err);
           alert(
@@ -843,11 +1143,12 @@ flashUpdating();
         }
       });
 
-      // BOUTON LOGIN / LOGOUT (by-id + context depuis confd)
+      // BOUTON LOGIN / LOGOUT
       const loginBtn = document.createElement('button');
       loginBtn.type = 'button';
       loginBtn.textContent = agent.logged ? 'Logout' : 'Login';
       setLoginButtonStyle(loginBtn, agent.logged);
+      loginBtn.classList.add('agent-login-btn');
 
       loginBtn.addEventListener('click', async () => {
         try {
@@ -874,37 +1175,13 @@ flashUpdating();
           await api(path, options);
 
           agent.logged = !agent.logged;
-          // Mise à jour visuelle du bouton Pause
-if (!agent.logged) {
-  agent.paused = false; // sécurité
-  pauseBtn.textContent = "Pause";
-  pauseBtn.classList.remove("btn--pause-active");
-  pauseBtn.classList.add("btn--pause-disabled");
-} else {
-  pauseBtn.classList.remove("btn--pause-disabled");
-  if (agent.paused) {
-    pauseBtn.classList.add("btn--pause-active");
-    pauseBtn.textContent = "Reprendre";
-  } else {
-    pauseBtn.classList.remove("btn--pause-active");
-    pauseBtn.textContent = "Pause";
-  }
-}
+          if (!agent.logged) {
+            agent.paused = false;
+          }
 
-
-          const newStatus = getStatusInfo(agent);
-const newPause = getPauseInfo(agent);
-statusTd.innerHTML = `<span class="pill ${newStatus.css}">${newStatus.text}</span>`;
-pauseTd.innerHTML = `<span class="pill ${newPause.css}">${newPause.text}</span>`;
-
-pauseBtn.disabled = !agent.logged;
-pauseBtn.textContent = agent.paused ? 'Reprendre' : 'Pause';
-loginBtn.textContent = agent.logged ? 'Logout' : 'Login';
-setLoginButtonStyle(loginBtn, agent.logged);
-
-updateHeaderStats();
-flashUpdating();
-
+          syncAgentDom(agent);
+          updateHeaderStats();
+          flashUpdating();
         } catch (err) {
           console.error('[Superviseur] Erreur login/logout', err);
           alert(
@@ -924,27 +1201,159 @@ flashUpdating();
     table.appendChild(tbody);
     body.appendChild(table);
     section.appendChild(body);
-    containerEl.appendChild(section);
-  });
+
+    // 🔎 Filtre de recherche pour "Sans file d'attente"
+    if (isParking && searchInput) {
+      searchInput.addEventListener('input', () => {
+        const term = searchInput.value.toLowerCase().trim();
+        tbody.querySelectorAll('tr').forEach((row) => {
+          const name = row.cells[0]?.textContent?.toLowerCase() || '';
+          const ext = row.cells[1]?.textContent?.toLowerCase() || '';
+          const visible =
+            !term || name.includes(term) || ext.includes(term);
+          row.style.display = visible ? '' : 'none';
+        });
+      });
+    }
+
+    return section;
+  };
+
+    // 1) Ligne spéciale : Support IT + file "parking" (à droite)
+  if (supportName || parkingName) {
+    const row = document.createElement('div');
+    row.className = 'queues-row';
+
+    if (supportName) {
+      const supportRows = groups.get(supportName) || [];
+      row.appendChild(buildQueueCard(supportName, supportRows));
+    }
+
+    if (parkingName) {
+      const parkingRows = groups.get(parkingName) || [];
+      row.appendChild(buildQueueCard(parkingName, parkingRows));
+    }
+
+    containerEl.appendChild(row);
+  }
+
+  // 2) Ligne SAV : toutes les files SAV sur une même rangée
+  if (savNames.length) {
+    const savRow = document.createElement('div');
+    savRow.className = 'queues-row';
+
+    savNames
+      .sort((a, b) => a.localeCompare(b, 'fr'))
+      .forEach((queueName) => {
+        const rows = groups.get(queueName) || [];
+        savRow.appendChild(buildQueueCard(queueName, rows));
+      });
+
+    containerEl.appendChild(savRow);
+  }
+
+  // 3) Autres files (une carte par ligne)
+  otherNames
+    .sort((a, b) => a.localeCompare(b, 'fr'))
+    .forEach((queueName) => {
+      const rows = groups.get(queueName) || [];
+      containerEl.appendChild(buildQueueCard(queueName, rows));
+    });
 }
+
+
 
 // -------------------------------------------------------------------
 // Chargement des données
 // -------------------------------------------------------------------
 
-async function loadData(api) {
-  setStatus('Chargement des agents…', 'info');
+function buildStatsPeriod() {
+  const now = new Date();
+
+  const startToday = new Date(
+    now.getFullYear(),
+    now.getMonth(),
+    now.getDate(),
+    STATS_START_HOUR,
+    0,
+    0,
+    0
+  );
+  const endToday = new Date(
+    now.getFullYear(),
+    now.getMonth(),
+    now.getDate(),
+    STATS_END_HOUR,
+    0,
+    0,
+    0
+  );
+
+  let from;
+  let until;
+
+  if (now < startToday) {
+    // avant 9h → on prend la plage de la veille
+    const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+    from = new Date(
+      yesterday.getFullYear(),
+      yesterday.getMonth(),
+      yesterday.getDate(),
+      STATS_START_HOUR,
+      0,
+      0,
+      0
+    );
+    until = new Date(
+      yesterday.getFullYear(),
+      yesterday.getMonth(),
+      yesterday.getDate(),
+      STATS_END_HOUR,
+      0,
+      0,
+      0
+    );
+  } else {
+    from = startToday;
+    until = now > endToday ? endToday : now;
+  }
+
+  return {
+    from: from.toISOString(),
+    until: until.toISOString(),
+  };
+}
+
+async function loadData(api, { silent = false } = {}) {
+  if (!silent) {
+    setStatus('Chargement des agents…', 'info');
+  }
 
   try {
-    const [agentsRaw, queuesRaw, usersRaw] = await Promise.all([
+    const { from, until } = buildStatsPeriod();
+
+    const [agentsRaw, queuesRaw, usersRaw, queuesStatsRaw] = await Promise.all([
       api('/api/agentd/1.0/agents?recurse=true', { method: 'GET' }),
       api('/api/confd/1.1/queues?recurse=true', { method: 'GET' }),
       api('/api/confd/1.1/users?recurse=true', { method: 'GET' }),
+      api(
+        `/api/call-logd/1.0/queues/statistics?from=${encodeURIComponent(
+          from
+        )}&until=${encodeURIComponent(until)}`,
+        { method: 'GET' }
+      ).catch((e) => {
+        console.warn(
+          '[Superviseur] Impossible de charger les stats call-logd :',
+          e
+        );
+        return null;
+      }),
     ]);
 
     console.log('[Superviseur] Agents reçus', agentsRaw);
     console.log('[Superviseur] Queues reçues', queuesRaw);
     console.log('[Superviseur] Utilisateurs reçus', usersRaw);
+    console.log('[Superviseur] Stats queues reçues', queuesStatsRaw);
 
     const { groups, queuesMeta } = groupAgentsByQueue(
       queuesRaw,
@@ -955,16 +1364,36 @@ async function loadData(api) {
     state.groups = groups;
     state.queuesMeta = queuesMeta;
 
+        // Collecte des users pour charger leurs renvois inconditionnels
+    const userUuidSet = new Set();
+    for (const rows of groups.values()) {
+      rows.forEach((agent) => {
+        if (agent.userUuid) {
+          userUuidSet.add(agent.userUuid);
+        }
+      });
+    }
+
+    // Renvois inconditionnels actuels (enabled + numéro)
+    state.userForwards = await loadUserForwards(api, userUuidSet);
+
+    state.queueStats = new Map();
+
     renderQueues(groups, api, queuesMeta);
 
-    setStatus('Agents chargés.', 'success');
+    if (!silent) {
+      setStatus('Agents chargés.', 'success');
+    }
   } catch (err) {
     console.error('[Superviseur] Erreur loadData :', err);
-    setStatus(
-      err.message || 'Erreur lors de la récupération de la liste des agents.',
-      'error'
-    );
-    renderEmptyState('Erreur lors du chargement des agents.');
+    if (!silent) {
+      setStatus(
+        err.message ||
+          'Erreur lors de la récupération de la liste des agents.',
+        'error'
+      );
+      renderEmptyState('Erreur lors du chargement des agents.');
+    }
   }
 }
 
@@ -979,7 +1408,7 @@ function scheduleRealtimeReload(api) {
   setTimeout(async () => {
     state.realtimeReloadScheduled = false;
     try {
-      await loadData(api);
+      await loadData(api, { silent: true });
     } catch (e) {
       console.error('[Superviseur] Erreur reload temps réel', e);
     }
@@ -1012,14 +1441,7 @@ function connectRealtime(baseUrl, token, api) {
       const data = JSON.parse(event.data);
       console.log('[Superviseur] Event temps réel', data);
 
-      const topic = data.name || data.event || '';
-      if (
-        topic.includes('agentd') ||
-        topic.includes('queue') ||
-        topic.includes('call_center')
-      ) {
-        scheduleRealtimeReload(api);
-      }
+      scheduleRealtimeReload(api);
     } catch (err) {
       console.error('[Superviseur] Erreur parsing WS message', err);
     }
@@ -1031,7 +1453,7 @@ function connectRealtime(baseUrl, token, api) {
       if (state.api) {
         state.websocket = connectRealtime(baseUrl, token, api);
       }
-    }, 5000);
+    }, 1200);
   };
 
   ws.onerror = (err) => {
@@ -1042,7 +1464,32 @@ function connectRealtime(baseUrl, token, api) {
 }
 
 // -------------------------------------------------------------------
-// Initialisation du plugin
+// Auto-refresh optimisé (cohabite bien avec WebSocket)
+// -------------------------------------------------------------------
+
+function startAutoRefresh(api) {
+  if (autoRefreshTimer) return;
+
+  autoRefreshTimer = setInterval(async () => {
+    if (state.websocket && state.websocket.readyState === WebSocket.OPEN) {
+      return;
+    }
+
+    if (isAutoRefreshing) return;
+    isAutoRefreshing = true;
+
+    try {
+      await loadData(api, { silent: true });
+    } catch (err) {
+      console.error('[Superviseur] Erreur auto-refresh :', err);
+    } finally {
+      isAutoRefreshing = false;
+    }
+  }, AUTO_REFRESH_INTERVAL_MS);
+}
+
+// -------------------------------------------------------------------
+// Initialisation du plugin (format E-UC commercial)
 // -------------------------------------------------------------------
 
 (async () => {
@@ -1070,8 +1517,13 @@ function connectRealtime(baseUrl, token, api) {
     state.baseUrl = baseUrl;
     state.token = token;
 
+    // Premier chargement
     await loadData(api);
 
+    // Auto-refresh léger en fond (toutes les 15s, skip si WebSocket OK)
+    startAutoRefresh(api);
+
+    // WebSocket pour les mises à jour temps réel
     state.websocket = connectRealtime(baseUrl, token, api);
   } catch (err) {
     console.error('[Superviseur] Erreur init :', err);

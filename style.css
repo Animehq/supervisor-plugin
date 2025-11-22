@@ -46,7 +46,7 @@
   --shadow-card:         0 18px 35px rgba(15, 23, 42, 0.07);
 }
 
-/* Mode sombre - activé via .is-dark sur <html> ou <body> */
+/* Mode sombre - activé via .is-dark sur <body> */
 :root.is-dark,
 body.is-dark {
   /* Fond général */
@@ -111,7 +111,7 @@ body {
 body {
   font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
     sans-serif;
-  background-color: var(--color-bg); /* ✅ fond uni pro */
+  background-color: var(--color-bg);
   color: var(--color-text);
 }
 
@@ -135,8 +135,8 @@ body.is-compact .page {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 1.25rem;
-  margin-bottom: 1.75rem;
+  gap: 1.5rem;
+  margin-bottom: 1.5rem;
 }
 
 .page-header-left h1 {
@@ -159,16 +159,17 @@ body.is-compact .page {
   gap: 0.5rem;
 }
 
-/* Status global (texte "Agents chargés.", erreurs, etc.) */
+/* Status global */
 
 .status {
-  padding: 0.35rem 0.9rem;
+  min-width: 200px;
+  padding: 0.3rem 0.9rem;
   border-radius: 999px;
-  font-size: 0.75rem;
+  font-size: 0.78rem;
   font-weight: 500;
+  text-align: center;
+  box-shadow: none;
   border: 1px solid transparent;
-  min-width: 220px;
-  text-align: right;
 }
 
 .status--info {
@@ -178,9 +179,15 @@ body.is-compact .page {
 }
 
 .status--success {
-  background-color: var(--color-success-soft);
-  border-color: #bbf7d0;
-  color: var(--color-success);
+  background-color: rgba(22, 163, 74, 0.06);
+  color: #16a34a;
+  border: 1px solid rgba(22, 163, 74, 0.45);
+}
+
+body.is-dark .status--success {
+  background-color: rgba(22, 163, 74, 0.15);
+  color: #4ade80;
+  border-color: rgba(34, 197, 94, 0.7);
 }
 
 .status--error {
@@ -189,27 +196,80 @@ body.is-compact .page {
   color: #b91c1c;
 }
 
-/* Boutons de vue (Mode compact / Thème sombre) */
+/* ============================================================
+   SWITCHS (Mode compact / Thème sombre)
+   ============================================================ */
 
-.view-toggles {
+.header-switches {
   display: flex;
-  gap: 0.5rem;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.45rem;
 }
 
-.btn-toggle {
+/* Une ligne = texte + switch */
+.switch-row {
+  display: flex;
+  align-items: center;   /* centre verticalement label + switch */
+  justify-content: flex-end;
+  gap: 0.6rem;
+  height: 24px;          /* même hauteur que le switch */
+}
+
+/* Texte à gauche, centré verticalement */
+.switch-label {
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+  line-height: 24px;     /* même hauteur que le switch */
+}
+
+/* Bouton switch type iOS */
+.toggle-switch {
+  position: relative;
+  width: 42px;
+  height: 24px;
+  padding: 0;
   border-radius: 999px;
-  border: 1px solid var(--color-border-medium);
-  padding: 0.25rem 0.75rem;
-  font-size: 0.75rem;
-  font-weight: 500;
-  background: var(--color-bg-elevated);
-  color: var(--color-primary);
+  border: none;
+  background-color: #e5e7eb; /* track OFF */
   cursor: pointer;
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+  box-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.7);
+  margin: 0;
 }
 
-.btn-toggle:hover {
-  background: var(--color-primary-soft);
+/* Thumb */
+.toggle-switch::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background-color: #ffffff;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.2);
+  transition: transform 0.16s ease, background-color 0.16s ease;
+}
+
+/* ON */
+.toggle-switch.toggle--active {
+  background-color: #0d9488;
+  box-shadow: inset 0 0 0 1px rgba(5, 150, 105, 0.9);
+}
+
+.toggle-switch.toggle--active::after {
+  transform: translateX(18px);
+}
+
+/* Dark mode : piste plus sombre */
+body.is-dark .toggle-switch {
+  background-color: #1f2937;
+  box-shadow: inset 0 0 0 1px #111827;
+}
+
+body.is-dark .toggle-switch.toggle--active {
+  background-color: #059669;
+  box-shadow: inset 0 0 0 1px #16a34a;
 }
 
 /* ============================================================
@@ -327,6 +387,7 @@ body.is-compact .agents-table {
   padding: 0.55rem 0.65rem;
   text-align: left;
   white-space: nowrap;
+  vertical-align: middle;
 }
 
 body.is-compact .agents-table th,
@@ -361,8 +422,15 @@ body.is-compact .agents-table td {
 
 .col-supervision {
   min-width: 160px;
-  display: flex;
-  gap: 0.25rem;
+}
+
+.col-supervision .btn {
+  display: inline-block;
+  margin-right: 0.25rem;
+}
+
+.col-supervision .btn:last-child {
+  margin-right: 0;
 }
 
 /* Drag & drop */
@@ -425,6 +493,13 @@ body.is-compact .agents-table td {
   color: var(--color-success);
 }
 
+/* Pause quand agent déconnecté */
+.pill--pause-off {
+  background-color: var(--color-off-bg);
+  color: var(--color-off-text);
+  border-color: var(--color-off-border);
+}
+
 /* ============================================================
    BOUTONS
    ============================================================ */
@@ -480,149 +555,18 @@ body.is-compact .agents-table td {
   pointer-events: none !important;
 }
 
-.btn--secondary:disabled {
-  background-color: var(--color-off-bg) !important;
-  border-color: var(--color-off-border) !important;
-  color: var(--color-off-text) !important;
+/* Mode clair : gros bouton gris bien visible */
+body:not(.is-dark) .btn--secondary:disabled {
+  background-color: #e5e7eb !important;
+  border-color: #d1d5db !important;
+  color: #9ca3af !important;
 }
 
-.status {
-  min-width: 200px;
-  padding: 0.3rem 0.9rem;
-  border-radius: 999px;
-  font-size: 0.78rem;
-  font-weight: 500;
-  text-align: center;
-  box-shadow: none;
-  border: 1px solid transparent;
-}
-
-.status--success {
-  background-color: rgba(22, 163, 74, 0.06);
-  color: #16a34a;
-  border: 1px solid rgba(22, 163, 74, 0.45);
-}
-
-body.is-dark .status--success {
-  background-color: rgba(22, 163, 74, 0.15);
-  color: #4ade80;
-  border-color: rgba(34, 197, 94, 0.7);
-}
-
-/* Header aligné titre / toggles / statut */
-.page-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 1.5rem;
-  margin-bottom: 1.5rem;
-}
-
-.page-header-left h1 {
-  margin: 0;
-}
-
-.page-header-left .page-subtitle {
-  margin: 0.25rem 0 0;
-  font-size: 0.85rem;
-}
-
-.page-header-right {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 0.5rem;
-}
-
-/* Ligne texte + switch */
-.header-switches {
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-}
-
-.switch-row {
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-}
-
-.switch-label {
-  font-size: 0.8rem;
-  color: var(--color-text-muted);
-}
-
-/* Bouton switch type iOS */
-.toggle-switch {
-  position: relative;
-  width: 42px;
-  height: 24px;
-  padding: 0;
-  border-radius: 999px;
-  border: none;
-  background-color: #e5e7eb; /* track OFF */
-  cursor: pointer;
-  box-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.7);
-}
-
-/* Thumb */
-.toggle-switch::after {
-  content: '';
-  position: absolute;
-  top: 3px;
-  left: 3px;
-  width: 18px;
-  height: 18px;
-  border-radius: 999px;
-  background-color: #ffffff;
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.2);
-  transition: transform 0.16s ease, background-color 0.16s ease;
-}
-
-/* ON = ton JS ajoute/retire déjà .toggle--active */
-.toggle-switch.toggle--active {
-  background-color: #0d9488; /* teal ON */
-  box-shadow: inset 0 0 0 1px rgba(5, 150, 105, 0.9);
-}
-
-.toggle-switch.toggle--active::after {
-  transform: translateX(18px);
-}
-
-/* Dark mode : piste un peu plus sombre */
-body.is-dark .toggle-switch {
-  background-color: #1f2937;
-  box-shadow: inset 0 0 0 1px #111827;
-}
-
-body.is-dark .toggle-switch.toggle--active {
-  background-color: #059669;
-  box-shadow: inset 0 0 0 1px #16a34a;
-}
-
-
-/* Statut “Agents chargés” plus propre */
-.status {
-  min-width: 200px;
-  padding: 0.3rem 0.9rem;
-  border-radius: 999px;
-  font-size: 0.78rem;
-  font-weight: 500;
-  text-align: center;
-  box-shadow: none;
-  border: 1px solid transparent;
-}
-
-.status--success {
-  background-color: rgba(22, 163, 74, 0.06);
-  color: #16a34a;
-  border: 1px solid rgba(22, 163, 74, 0.45);
-}
-
-body.is-dark .status--success {
-  background-color: rgba(22, 163, 74, 0.15);
-  color: #4ade80;
-  border-color: rgba(34, 197, 94, 0.7);
+/* Mode sombre : bouton presque noir, texte gris */
+body.is-dark .btn--secondary:disabled {
+  background-color: #020617 !important;
+  border-color: #111827 !important;
+  color: #6b7280 !important;
 }
 
 /* Bouton Pause actif (agent connecté) */
@@ -641,29 +585,127 @@ body.is-dark .status--success {
   pointer-events: none !important;
 }
 
-/* ============================
-   Contraste fort pour PAUSE désactivé
-   ============================ */
-
-/* Mode clair : gros bouton gris bien visible */
-body:not(.is-dark) .btn--secondary:disabled {
-  background-color: #e5e7eb !important;  /* gris clair plein */
-  border-color: #d1d5db !important;
-  color: #9ca3af !important;
-}
-
-/* Mode sombre : bouton presque noir, texte gris */
-body.is-dark .btn--secondary:disabled {
-  background-color: #020617 !important;  /* quasi noir */
-  border-color: #111827 !important;
-  color: #6b7280 !important;
-}
-
-/* Highlight court quand la file vient d'être mise à jour */
+/* Petit flash visuel quand la file est mise à jour */
 .queue-card--updating {
   box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.9), var(--shadow-card);
   transition: box-shadow 0.25s ease-out;
 }
+
+/* Ligne de 2 cartes côte à côte (Support IT + Sans file d'attente) */
+.queues-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.5rem;
+}
+
+.queues-row .queue-card {
+  flex: 1 1 0;
+}
+
+/* Barre de recherche dans "Sans file d'attente" */
+.queue-search-input {
+  margin-top: 0.35rem;
+  padding: 0.25rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--color-border-medium);
+  font-size: 0.75rem;
+  background-color: var(--color-bg-elevated);
+  color: var(--color-text);
+}
+
+body.is-dark .queue-search-input {
+  background-color: #020617;
+  border-color: #1f2937;
+  color: #e5e7eb;
+}
+
 /* ============================================================
-   FIN
+   LIGNES DE FILES (2 cartes côte à côte)
    ============================================================ */
+
+.queues-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.5rem;
+  align-items: stretch;
+}
+
+.queues-row .queue-card {
+  flex: 1 1 calc(50% - 0.75rem);
+}
+
+/* ============================================================
+   BARRE DE RECHERCHE (file parking / hors call center)
+   ============================================================ */
+
+.queue-search-input {
+  margin-top: 0.35rem;
+  padding: 0.25rem 0.6rem;
+  border-radius: 999px;
+  border: 1px solid var(--color-border-medium);
+  font-size: 0.75rem;
+  background-color: var(--color-bg-elevated);
+  color: var(--color-text);
+  min-width: 180px;
+}
+
+.queue-search-input::placeholder {
+  color: var(--color-text-soft);
+}
+
+body.is-dark .queue-search-input {
+  background-color: #020617;
+  border-color: #1f2937;
+  color: #e5e7eb;
+}
+
+/* ============================================================
+   COLONNE TRANSFERT MOBILE
+   ============================================================ */
+
+.col-transfer {
+  min-width: 220px;
+}
+
+.transfer-control {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.transfer-input {
+  width: 7rem;
+  max-width: 100%;
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  border: 1px solid var(--color-border-medium);
+  font-size: 0.72rem;
+  background-color: var(--color-bg-elevated);
+  color: var(--color-text);
+}
+
+.transfer-input::placeholder {
+  color: var(--color-text-soft);
+}
+
+body.is-dark .transfer-input {
+  background-color: #020617;
+  border-color: #1f2937;
+  color: #e5e7eb;
+}
+
+/* Boutons ON/OFF plus lisibles en transfert */
+.transfer-control .btn--primary {
+  background-color: var(--color-success);
+  border-color: var(--color-success-soft);
+}
+
+.transfer-control .btn--secondary {
+  background-color: var(--color-bg-elevated);
+  border-color: var(--color-border-medium);
+}
+
+body.is-dark .transfer-control .btn--secondary {
+  background-color: #020617;
+  border-color: #1f2937;
+}
