@@ -49,6 +49,9 @@ const state = {
   userForwards: new Map(), // 👈 renvoi inconditionnel par userUuid
   websocket: null,
   realtimeReloadScheduled: false,
+  // Nouvel état pour les appels
+  callsByUser: new Map(),   // userUuid -> info d’appel
+  callDurationTimer: null,  // interval pour la durée en temps réel
 };
 
 const uiState = {
@@ -530,6 +533,7 @@ function computeQueuePresence(rows) {
     }
   });
 
+
   const offline = total - logged;
 
   return {
@@ -719,6 +723,109 @@ async function loadUserForwards(api, userUuidSet) {
 // Rendu des files + actions
 // -------------------------------------------------------------------
 
+function startCallDurationTicker() {
+  if (state.callDurationTimer) {
+    clearInterval(state.callDurationTimer);
+  }
+
+  const update = () => {
+    const now = Date.now();
+    document.querySelectorAll('.call-chip[data-call-start]').forEach((chip) => {
+      const start = Number(chip.dataset.callStart);
+      if (!start) return;
+      const secs = Math.max(0, Math.floor((now - start) / 1000));
+      const mm = String(Math.floor(secs / 60)).padStart(2, '0');
+      const ss = String(secs % 60).padStart(2, '0');
+
+      const durEl = chip.querySelector('.call-chip__duration');
+      if (durEl) {
+        durEl.textContent = `${mm}:${ss}`;
+      }
+    });
+  };
+
+  update();
+  state.callDurationTimer = setInterval(update, 1000);
+}
+
+async function buildCallsByUserMap_EUC(callsRaw, api) {
+  const map = new Map();
+  if (!callsRaw) return map;
+
+  const list = normalizeCollection(callsRaw);
+
+  for (const call of list) {
+    const data = call.data || call || {};
+
+    // --- Quel utilisateur (agent) est lié à cet appel ? ---
+    const userUuid =
+      data.user_uuid ||
+      (Array.isArray(data.users) && data.users[0] && data.users[0].uuid) ||
+      data.source_user_uuid ||
+      data.owner_uuid ||
+      null;
+
+    if (!userUuid) continue;
+
+    // --- Numéro distant ---
+    let number = null;
+
+    if (data.direction === 'outbound') {
+      // Appel sortant : on privilégie le numéro externe
+      number =
+        data.other_party_number ||
+        data.remote_callee_id_number ||
+        data.callee_id_number ||
+        data.callee_exten ||      // si appel interne
+        data.dialed_extension ||
+        null;
+    } else if (data.direction === 'inbound') {
+      // Appel entrant
+      number =
+        data.other_party_number ||
+        data.remote_caller_id_number ||
+        data.caller_id_number ||
+        data.display_caller_name ||
+        null;
+    } else {
+      // Fallback si direction inconnue
+      number =
+        data.other_party_number ||
+        data.caller_id_number ||
+        data.callee_id_number ||
+        null;
+    }
+
+    // --- Date de début pour le timer ---
+    let startedAtMs = null;
+
+    if (data.started_at) {
+      const ts = Date.parse(data.started_at);
+      if (Number.isFinite(ts)) startedAtMs = ts;
+    } else if (data.creation_time) {
+      const ts = Date.parse(data.creation_time);
+      if (Number.isFinite(ts)) startedAtMs = ts;
+    }
+
+    // Si on n'a vraiment rien, on prend "maintenant"
+    if (!Number.isFinite(startedAtMs)) {
+      startedAtMs = Date.now();
+    }
+
+    map.set(userUuid, {
+      number,
+      direction: data.direction === 'inbound' ? 'inbound' : 'outbound',
+      startedAt: startedAtMs,
+    });
+  }
+
+  console.log('[Superviseur] callsByUser EUC construit', map);
+  return map;
+}
+
+
+
+
 function renderQueues(groups, api, queuesMeta) {
   clearContainer();
   if (!containerEl) return;
@@ -860,6 +967,7 @@ function renderQueues(groups, api, queuesMeta) {
         <th>NOM</th>
         <th>EXTENSION</th>
         <th>ÉTAT</th>
+        <th>APPEL EN COURS</th>
         <th>SUPERVISION</th>
         <th>TRANSFERT</th>
         <th class="col-actions">ACTIONS</th>
@@ -919,18 +1027,47 @@ function renderQueues(groups, api, queuesMeta) {
         tr.dataset.agentNumber = agent.number || agent.extension;
       }
 
-      const statusInfo = getStatusInfo(agent);
+      const callsByUser = state.callsByUser || new Map();
+const statusInfo = getStatusInfo(agent);
 
-      tr.innerHTML = `
-        <td>${agent.name}</td>
-        <td>${agent.extension || '—'}</td>
-        <td class="col-status">
-          <span class="pill ${statusInfo.css}">${statusInfo.text}</span>
-        </td>
-        <td class="col-supervision"></td>
-        <td class="col-transfer"></td>
-        <td class="col-actions"></td>
-      `;
+let callCellHtml = '';
+const callInfo =
+  agent.userUuid && callsByUser.has(agent.userUuid)
+    ? callsByUser.get(agent.userUuid)
+    : null;
+
+if (!callInfo) {
+  callCellHtml = `
+    <div class="call-chip call-chip--none">
+      <span class="call-chip__number">—</span>
+      <span class="call-chip__duration"></span>
+    </div>
+  `;
+} else {
+  const label = callInfo.number || 'Appel en cours';
+  callCellHtml = `
+    <div class="call-chip call-chip--active" data-call-start="${callInfo.startedAt}">
+      ${callInfo.direction === "inbound"
+  ? '<span class="call-chip__dir inbound">⬅️</span>'
+  : '<span class="call-chip__dir outbound">➡️</span>'}
+<span class="call-chip__number">${label}</span
+      <span class="call-chip__duration">00:00</span>
+    </div>
+  `;
+}
+
+tr.innerHTML = `
+  <td>${agent.name}</td>
+  <td>${agent.extension || '—'}</td>
+  <td class="col-status">
+    <span class="pill ${statusInfo.css}">${statusInfo.text}</span>
+  </td>
+  <td class="col-callinfo">${callCellHtml}</td>
+  <td class="col-supervision"></td>
+  <td class="col-transfer"></td>
+  <td class="col-actions"></td>
+`;
+
 
       const supervisionCell = tr.querySelector('.col-supervision');
       const transferCell = tr.querySelector('.col-transfer');
@@ -1258,6 +1395,11 @@ function renderQueues(groups, api, queuesMeta) {
       const rows = groups.get(queueName) || [];
       containerEl.appendChild(buildQueueCard(queueName, rows));
     });
+
+  // Met à jour la durée des appels en temps réel
+  startCallDurationTicker()
+
+
 }
 
 
@@ -1331,23 +1473,32 @@ async function loadData(api, { silent = false } = {}) {
   try {
     const { from, until } = buildStatsPeriod();
 
-    const [agentsRaw, queuesRaw, usersRaw, queuesStatsRaw] = await Promise.all([
-      api('/api/agentd/1.0/agents?recurse=true', { method: 'GET' }),
-      api('/api/confd/1.1/queues?recurse=true', { method: 'GET' }),
-      api('/api/confd/1.1/users?recurse=true', { method: 'GET' }),
-      api(
-        `/api/call-logd/1.0/queues/statistics?from=${encodeURIComponent(
-          from
-        )}&until=${encodeURIComponent(until)}`,
-        { method: 'GET' }
-      ).catch((e) => {
-        console.warn(
-          '[Superviseur] Impossible de charger les stats call-logd :',
-          e
-        );
-        return null;
-      }),
-    ]);
+
+const [agentsRaw, queuesRaw, usersRaw, queuesStatsRaw, callsRaw] =
+  await Promise.all([
+    api('/api/agentd/1.0/agents?recurse=true', { method: 'GET' }),
+    api('/api/confd/1.1/queues?recurse=true', { method: 'GET' }),
+    api('/api/confd/1.1/users?recurse=true', { method: 'GET' }),
+    api(
+      `/api/call-logd/1.0/queues/statistics?from=${encodeURIComponent(
+        from
+      )}&until=${encodeURIComponent(until)}`,
+      { method: 'GET' }
+    ).catch((e) => {
+      console.warn(
+        '[Superviseur] Impossible de charger les stats call-logd :',
+        e
+      );
+      return null;
+    }),
+    api('/api/calld/1.0/calls', { method: 'GET' }).catch((e) => {
+      console.warn(
+        '[Superviseur] Impossible de charger les appels en cours :',
+        e
+      );
+      return null;
+    }),
+  ]);
 
     console.log('[Superviseur] Agents reçus', agentsRaw);
     console.log('[Superviseur] Queues reçues', queuesRaw);
@@ -1358,10 +1509,13 @@ async function loadData(api, { silent = false } = {}) {
       queuesRaw,
       usersRaw,
       agentsRaw
+      
     );
 
     state.groups = groups;
     state.queuesMeta = queuesMeta;
+// Appels en cours → map userUuid -> { number, direction, startedAt }
+state.callsByUser = await buildCallsByUserMap_EUC(callsRaw, api);
 
         // Collecte des users pour charger leurs renvois inconditionnels
     const userUuidSet = new Set();
@@ -1458,16 +1612,57 @@ function connectRealtime(baseUrl, token, api) {
     console.log('[Superviseur] WebSocket ouvert');
   };
 
-  ws.onmessage = (event) => {
-    try {
-      const data = JSON.parse(event.data);
-      console.log('[Superviseur] Event temps réel', data);
+  ws.onmessage = async (event) => {
+  let data;
+  try {
+    data = JSON.parse(event.data);
+  } catch (e) {
+    return;
+  }
 
-      scheduleRealtimeReload(api);
-    } catch (err) {
-      console.error('[Superviseur] Erreur parsing WS message', err);
-    }
-  };
+  const ev = data.event_type || data.type || data.op;
+  const payload = data.data || data;
+
+  console.log("[Superviseur] WS event :", ev, payload);
+
+  if (ev === "user.status.update") {
+    await loadData(api, { silent: true });
+    return;
+}
+
+  // --- EVENTS AGENTS ---
+  if (ev === "agent.logged_in" || ev === "agent.logged_out") {
+    await loadData(api, { silent: true });
+    return;
+  }
+
+  if (ev === "queue.member.paused" || ev === "queue.member.unpaused") {
+    await loadData(api, { silent: true });
+    return;
+  }
+
+  // --- EVENTS APPELS ---
+  if (
+  ev === "call.created" ||
+  ev === "call.updated" ||
+  ev === "call.answered" ||
+  ev === "call.hangup"
+) {
+    const callsRaw = await api('/api/calld/1.0/calls');
+state.callsByUser = await buildCallsByUserMap_EUC(callsRaw, api);
+    renderQueues(state.groups, api, state.queuesMeta);
+
+    // ⏱ relancer la mise à jour du timer !!
+    startCallDurationTicker();
+
+    return;
+}
+
+
+  // fallback
+  scheduleRealtimeReload(api);
+};
+
 
 ws.onclose = (ev) => {
   console.warn('[Superviseur] WebSocket fermé', ev.code, ev.reason);

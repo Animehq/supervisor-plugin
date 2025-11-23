@@ -416,6 +416,27 @@ body.is-compact .agents-table td {
 
 /* Colonnes */
 
+/* Colonne "Appel en cours" */
+.col-callinfo {
+  min-width: 180px;
+}
+
+.callinfo-box {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 0.72rem;
+}
+
+.callinfo-number {
+  font-weight: 600;
+}
+
+.callinfo-duration {
+  font-size: 0.68rem;
+  color: var(--color-text-muted);
+}
+
 .col-actions {
   min-width: 110px;
 }
@@ -801,4 +822,58 @@ body.is-dark .transfer-control .btn--secondary {
 .agent-login-btn {
   min-width: 85px;     /* même largeur que Pause/Reprendre pour un tableau propre */
   text-align: center;
+}
+
+.col-callinfo {
+  min-width: 180px;
+}
+
+.call-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  padding: 0.25rem 0.8rem;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  border: 1px solid var(--color-border-soft);
+  background-color: var(--color-bg-elevated);
+  color: var(--color-text-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+.call-chip__number {
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.call-chip__duration {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    "Liberation Mono", "Courier New", monospace;
+  opacity: 0.9;
+}
+
+.call-chip--active {
+  background-color: var(--color-primary-soft);
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+.call-chip--none {
+  opacity: 0.55;
+}
+
+.call-chip__dir {
+  font-size: 14px;
+  margin-right: 6px;
+}
+
+.call-chip__dir.inbound {
+  color: #3ddc97; /* vert */
+}
+
+.call-chip__dir.outbound {
+  color: #3db2ff; /* bleu */
 }
