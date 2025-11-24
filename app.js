@@ -47,6 +47,9 @@ const state = {
   queuesMeta: new Map(),
   queueStats: new Map(), // 👈 stats call-logd par queue_id
   userForwards: new Map(), // 👈 renvoi inconditionnel par userUuid
+  userAvailability: new Map(), // présence chatd
+  userSessions: new Map(),    // connecté / non connecté (auth)
+  userDnd: new Map(),         // service DND (confd)
   websocket: null,
   realtimeReloadScheduled: false,
   // Nouvel état pour les appels
@@ -299,6 +302,66 @@ function buildUsersMaps(usersRaw) {
   return { usersByUuid, usersByExt };
 }
 
+function buildUserAvailabilityFromPresences(presencesRaw) {
+  const map = new Map();
+  if (!presencesRaw) return map;
+
+  let items = [];
+
+  // Plusieurs formes possibles suivant la version :
+  if (Array.isArray(presencesRaw.items)) {
+    items = presencesRaw.items;
+  } else if (Array.isArray(presencesRaw.presences)) {
+    items = presencesRaw.presences;
+  } else if (Array.isArray(presencesRaw)) {
+    items = presencesRaw;
+  }
+
+  items.forEach((item) => {
+    const uuid =
+      item.user_uuid || item.userUuid || item.uuid || item.id || null;
+    if (!uuid) return;
+
+    // On essaie de récupérer un champ "agrégé"
+    // ⚠️ On privilégie d'abord les états riches (state / status / flags)
+    let value =
+      item.state ||
+      item.status ||
+      null;
+
+    // Certains payloads exposent des booléens dnd / invisible
+    if (!value && typeof item.dnd === 'boolean') {
+      value = item.dnd ? 'dnd' : 'available';
+    }
+    if (!value && typeof item.invisible === 'boolean') {
+      if (item.invisible) {
+        value = 'invisible';
+      }
+    }
+
+    // Si toujours rien, on retombe sur availability / presence.*
+    if (!value) {
+      value =
+        item.availability ||
+        (item.presence &&
+          (item.presence.state ||
+            item.presence.status ||
+            item.presence.availability)) ||
+        // fallback : on garde l’objet entier, traité plus tard par getAvailabilityPill
+        item;
+    }
+
+    map.set(uuid, value);
+  });
+
+  console.log('[Superviseur] userAvailability (chatd)', map);
+  return map;
+}
+
+
+
+
+
 // agents → maps (par extension / id / uuid)
 function buildAgentsMaps(agentsRaw) {
   const agents = normalizeCollection(agentsRaw);
@@ -502,9 +565,101 @@ function groupAgentsByQueue(queuesRaw, usersRaw, agentsRaw) {
     });
   });
 
+   // ======================================================
+  // GROUPE VIRTUEL "Hors call center"
+  //   -> tous les users qui ont une extension,
+  //      même s'ils sont déjà membres d'une ou plusieurs files
+  // ======================================================
+  const PARKING_LABEL = 'Hors call center';
+
+  const parkingRows = [];
+
+  usersByUuid.forEach((user, uuid) => {
+    // pas d’extension -> inutile pour la supervision
+    if (!user.extension) return;
+
+    const agentInfo =
+      byUuid.get(uuid) ||
+      byExt.get(String(user.extension)) ||
+      null;
+
+    parkingRows.push({
+      id: agentInfo?.id ?? null,
+      extension: user.extension,
+      number: agentInfo?.number || null,
+      name: user.name,
+      logged: agentInfo?.logged ?? false,
+      paused: agentInfo?.paused ?? false,
+      queueId: null,             // ⬅️ pas de queue réelle
+      queueLabel: PARKING_LABEL, // ⬅️ nom affiché
+      userUuid: uuid,
+    });
+  });
+
+  if (parkingRows.length) {
+    groups.set(PARKING_LABEL, parkingRows);
+    // PAS de queuesMeta.set -> pas de queue_id réel, c'est voulu
+  }
+
+
+
+
   console.log('[Superviseur] Groupes construits', groups, queuesMeta);
   return { groups, queuesMeta };
 }
+
+async function buildUserSessionsForParking(groups, api) {
+  const PARKING_LABEL = 'Hors call center';
+  const map = new Map();
+
+  const parkingRows = groups.get(PARKING_LABEL);
+  if (!parkingRows || !parkingRows.length) {
+    return map;
+  }
+
+  // Uniquement les userUuid uniques de la file Hors ACD
+  const uniqueUuids = Array.from(
+    new Set(
+      parkingRows
+        .map((row) => row.userUuid)
+        .filter((uuid) => !!uuid)
+    )
+  );
+
+  const tasks = uniqueUuids.map(async (uuid) => {
+    try {
+      const res = await api(
+        `/api/auth/0.1/users/${encodeURIComponent(uuid)}/sessions`,
+        { method: 'GET' }
+      );
+
+      let sessions = [];
+      if (res && Array.isArray(res.items)) {
+        sessions = res.items;
+      } else if (res && Array.isArray(res.sessions)) {
+        sessions = res.sessions;
+      } else if (Array.isArray(res)) {
+        sessions = res;
+      }
+
+      const isConnected = sessions.length > 0;
+      map.set(uuid, isConnected);
+    } catch (e) {
+      console.warn(
+        '[Superviseur] Impossible de charger les sessions auth pour',
+        uuid,
+        e
+      );
+      map.set(uuid, false);
+    }
+  });
+
+  await Promise.all(tasks);
+
+  console.log('[Superviseur] userSessions (auth)', map);
+  return map;
+}
+
 
 // -------------------------------------------------------------------
 // Statuts / stats
@@ -519,6 +674,54 @@ function getStatusInfo(agent) {
   }
   return { text: 'Connecté', css: 'pill--online' };
 }
+
+function getAvailabilityPill(rawAvailability) {
+  if (rawAvailability == null) {
+    return { text: 'Indisponible', css: 'pill--offline' };
+  }
+
+  let v = String(rawAvailability).toLowerCase();
+
+  // 🟢 Disponible
+  if (v === 'available') {
+    return { text: 'Disponible', css: 'pill--available' };
+  }
+
+  // 🟠 Occupé
+  if (v === 'away') {
+    return { text: 'Occupé', css: 'pill--busy' };
+  }
+
+  // 🔴 Indisponible
+  if (v === 'unavailable') {
+    return { text: 'Indisponible', css: 'pill--unavailable' };
+  }
+
+  // 👻 Invisible
+  if (v.includes('invisible')) {
+    return { text: 'Invisible', css: 'pill--invisible' };
+  }
+
+  // Défaut = indisponible
+  return { text: 'Indisponible', css: 'pill--offline' };
+}
+
+function getDndPill(userUuid) {
+  if (!userUuid) {
+    return { text: '—', css: 'pill--offline' };
+  }
+
+  const map = state.userDnd || new Map();
+  const enabled = map.get(userUuid) === true;
+
+  if (enabled) {
+    return { text: 'DND', css: 'pill--dnd' };
+  }
+
+  // DND désactivé : on peut afficher "Off" ou "—"
+  return { text: 'Off', css: 'pill--available' };
+}
+
 
 
 function computeQueuePresence(rows) {
@@ -549,58 +752,123 @@ function computeQueuePresence(rows) {
 // -------------------------------------------------------------------
 
 async function moveAgentBetweenQueues(agentId, fromQueueId, toQueueId, api) {
-  if (!agentId || !fromQueueId || !toQueueId || fromQueueId === toQueueId) {
+  if (!agentId) return;
+
+  // Drop dans la même file ACD -> rien à faire
+  if (fromQueueId && toQueueId && fromQueueId === toQueueId) {
     return;
   }
 
+  const ops = [];
+  const isDropToParking = !toQueueId; // toQueueId === null => "Hors call center"
+
   try {
-    setStatus('Déplacement de l’agent…', 'info');
+    if (isDropToParking) {
+      // 🧹 Drop vers "Hors call center" :
+      // on enlève seulement l'agent de l’ancienne file
+      if (fromQueueId) {
+        setStatus('Retrait de l’agent de la file…', 'info');
+        ops.push(
+          api(`/api/agentd/1.0/agents/by-id/${agentId}/remove`, {
+            method: 'POST',
+            body: { queue_id: fromQueueId },
+          })
+        );
+      }
+    } else {
+      // ➕ Drop vers une file ACD :
+      // on AJOUTE l’agent dans la nouvelle file,
+      // sans le retirer des autres -> multi-files
+      setStatus('Ajout de l’agent dans la file…', 'info');
+      ops.push(
+        api(`/api/agentd/1.0/agents/by-id/${agentId}/add`, {
+          method: 'POST',
+          body: { queue_id: toQueueId },
+        })
+      );
+      // Pas de remove ici : l’agent peut rester dans les files précédentes
+    }
 
-    await api(`/api/agentd/1.0/agents/by-id/${agentId}/remove`, {
-      method: 'POST',
-      body: { queue_id: fromQueueId },
-    });
+    if (!ops.length) return;
 
-    await api(`/api/agentd/1.0/agents/by-id/${agentId}/add`, {
-      method: 'POST',
-      body: { queue_id: toQueueId },
-    });
-
+    await Promise.all(ops);
     await loadData(api);
-    setStatus('Agent déplacé.', 'success');
+    setStatus('Files mises à jour.', 'success');
   } catch (err) {
     console.error('[Superviseur] Erreur moveAgentBetweenQueues', err);
     alert(
-      'Erreur lors du déplacement de l’agent entre les files.\n' +
+      'Erreur lors de la mise à jour de l’agent dans les files.\n' +
         (err.message || '')
     );
-    setStatus('Erreur lors du déplacement de l’agent.', 'error');
+    setStatus('Erreur lors de la mise à jour des files.', 'error');
   }
 }
 
+
 // Synchronise toutes les lignes DOM d'un même agent (cas : agent dans plusieurs files)
 function syncAgentDom(agent) {
-  if (!agent || !agent.id || !containerEl) return;
+  if (!agent || !containerEl) return;
 
-  const rows = containerEl.querySelectorAll(
-    `tr[data-agent-id="${agent.id}"]`
-  );
+  // 1) on essaie par agent-id
+  let selector = null;
+  if (agent.id != null) {
+    selector = `tr[data-agent-id="${agent.id}"]`;
+  } else if (agent.userUuid) {
+    // 2) fallback par userUuid (cas Hors call center / multi-files)
+    selector = `tr[data-user-uuid="${agent.userUuid}"]`;
+  } else {
+    return;
+  }
+
+  const rows = containerEl.querySelectorAll(selector);
+  if (!rows.length) return;
 
   rows.forEach((row) => {
     const statusTd = row.querySelector('.col-status');
     const pauseBtn = row.querySelector('.agent-pause-btn');
     const loginBtn = row.querySelector('.agent-login-btn');
 
-    const statusInfo = getStatusInfo(agent);
+    let statusInfo;
+    const card = row.closest('.queue-card');
+    const isParkingRow =
+      card && card.classList.contains('queue-card--parking');
 
-    if (statusTd) {
+    if (isParkingRow && agent.userUuid) {
+      const sessionsMap = state.userSessions || new Map();
+      const dndMap = state.userDnd || new Map();
+      const availabilityMap = state.userAvailability || new Map();
+
+      const hasSession = sessionsMap.get(agent.userUuid) === true;
+      const dndEnabled = dndMap.get(agent.userUuid) === true;
+      const hasPresence = availabilityMap.has(agent.userUuid);
+
+      if (!hasSession) {
+        statusInfo = { text: 'Non connecté', css: 'pill--offline' };
+      } else if (dndEnabled) {
+        statusInfo = { text: 'Ne pas déranger', css: 'pill--dnd' };
+      } else if (hasPresence) {
+        const raw = availabilityMap.get(agent.userUuid);
+        statusInfo = getAvailabilityPill(raw);
+      } else {
+        statusInfo = { text: 'Disponible', css: 'pill--available' };
+      }
+    } else {
+      statusInfo = getStatusInfo(agent);
+    }
+
+    if (statusTd && statusInfo) {
       statusTd.innerHTML = `<span class="pill ${statusInfo.css}">${statusInfo.text}</span>`;
     }
+
+    // ⚠️ on NE TOUCHE PLUS à .col-dnd ici (sinon on efface le bouton)
 
     if (pauseBtn) {
       pauseBtn.disabled = !agent.logged;
       pauseBtn.textContent = agent.paused ? 'Reprendre' : 'Pause';
-      pauseBtn.classList.toggle('btn--pause-active', agent.logged && agent.paused);
+      pauseBtn.classList.toggle(
+        'btn--pause-active',
+        agent.logged && agent.paused
+      );
       pauseBtn.classList.toggle('btn--pause-disabled', !agent.logged);
     }
 
@@ -608,13 +876,16 @@ function syncAgentDom(agent) {
       loginBtn.textContent = agent.logged ? 'Logout' : 'Login';
       setLoginButtonStyle(loginBtn, agent.logged);
     }
-const supervisionButtons = row.querySelectorAll('.col-supervision .btn');
+
+    const supervisionButtons = row.querySelectorAll('.btn-supervision');
     supervisionButtons.forEach((btn) => {
       btn.disabled = !agent.logged;
     });
-    
   });
 }
+
+
+
 
 // -------------------------------------------------------------------
 // Supervision et transfert mobile
@@ -679,6 +950,168 @@ async function setUserMobileForward(userUuid, number, api) {
       body,
     }
   );
+}
+
+
+function syncAllDndButtonsForUser(userUuid, dndEnabled) {
+  // Pas d’UUID ou pas de conteneur → rien à faire
+  if (!userUuid || !containerEl) return;
+
+  // On récupère tous les boutons NPD (DND) de ce user,
+  // dans toutes les files d’attente
+  const buttons = containerEl.querySelectorAll(
+    `tr[data-user-uuid="${userUuid}"] .col-dnd button`
+  );
+
+  buttons.forEach((btn) => {
+    btn.classList.remove('btn--primary', 'btn--danger');
+
+    if (dndEnabled) {
+      // DND actif → bouton OFF rouge
+      btn.textContent = 'OFF';
+      btn.classList.add('btn--danger');
+      btn.setAttribute('aria-pressed', 'true');
+    } else {
+      // DND inactif → bouton ON vert
+      btn.textContent = 'ON';
+      btn.classList.add('btn--primary');
+      btn.setAttribute('aria-pressed', 'false');
+    }
+  });
+}
+
+
+
+function buildDndToggleCell(agent, api) {
+  const td = document.createElement('td');
+  td.className = 'col-dnd';
+
+  const btn = createActionButton('', 'primary');
+
+const getUserUuidFromRow = () => {
+  const row = btn.closest('tr');
+
+  if (row && row.dataset.userUuid) {
+    return row.dataset.userUuid;
+  }
+
+  // Cas où le bouton n'est pas encore dans un <tr>
+  return agent.userUuid || null;
+};
+
+
+  let currentUuid = getUserUuidFromRow();
+  if (!currentUuid) {
+    td.textContent = '—';
+    return td;
+  }
+
+  const isEnabledInState = (uuid) =>
+    !!(state.userDnd && state.userDnd.get(uuid) === true);
+
+  let dndEnabled = isEnabledInState(currentUuid);
+
+  const syncDndUi = () => {
+    btn.classList.remove('btn--primary', 'btn--danger');
+    if (dndEnabled) {
+      // DND actif -> OFF rouge
+      btn.textContent = 'OFF';
+      btn.classList.add('btn--danger');
+    } else {
+      // DND inactif -> ON vert
+      btn.textContent = 'ON';
+      btn.classList.add('btn--primary');
+    }
+  };
+
+  syncDndUi();
+
+  btn.addEventListener('click', async () => {
+  const userUuid = getUserUuidFromRow();
+  if (!userUuid) {
+    console.warn('[Superviseur] Pas de userUuid pour DND', agent);
+    return;
+  }
+
+    const targetState = !dndEnabled;
+
+  try {
+    setStatus(
+      `${targetState ? 'Activation' : 'Désactivation'} du DND pour ${agent.name}…`,
+      'info'
+    );
+
+    await api(
+      `/api/confd/1.1/users/${encodeURIComponent(userUuid)}/services/dnd`,
+      {
+        method: 'PUT',
+        body: { enabled: targetState },
+      }
+    );
+
+    if (!state.userDnd) state.userDnd = new Map();
+    state.userDnd.set(userUuid, targetState);
+
+    dndEnabled = targetState;
+    syncDndUi();
+
+    // 🔁 met à jour tous les boutons NPD de ce user
+    syncAllDndButtonsForUser(userUuid, targetState);
+
+    // 🔄 met à jour sa disponibilité dans toutes les files
+    syncAgentDom({ id: agent.id, userUuid });
+
+    setStatus('DND mis à jour.', 'success');
+  } catch (err) {
+    console.error('[Superviseur] Erreur DND', err);
+    setStatus('Erreur lors de la mise à jour du DND.', 'error');
+  }
+
+});
+
+
+  td.appendChild(btn);
+  return td;
+}
+
+
+
+
+async function loadUserDnd(api, userUuidSet) {
+  const result = new Map();
+
+  const tasks = Array.from(userUuidSet || []).map(async (uuid) => {
+    if (!uuid) {
+      return;
+    }
+
+    try {
+      const res = await api(
+        `/api/confd/1.1/users/${encodeURIComponent(
+          uuid
+        )}/services/dnd`,
+        { method: 'GET' }
+      );
+
+      // suivant la version, le flag peut s’appeler enabled / dnd / active
+      const enabled = !!(
+        res &&
+        (res.enabled === true ||
+          res.dnd === true ||
+          res.active === true)
+      );
+
+      result.set(uuid, enabled);
+    } catch (e) {
+      console.warn('[Superviseur] DND introuvable pour', uuid, e);
+      result.set(uuid, false);
+    }
+  });
+
+  await Promise.all(tasks);
+
+  console.log('[Superviseur] userDnd', result);
+  return result;
 }
 
 
@@ -836,16 +1269,16 @@ function renderQueues(groups, api, queuesMeta) {
   }
 
   const SUPPORT_IT_PATTERN = /support\s*it/i;
-  const PARKING_PATTERN = /(sans\s*file|hors\s*call\s*center|parking)/i;
   const SAV_PATTERN = /^sav\b/i;
+  const PARKING_LABEL = 'Hors call center';
 
   const allNames = Array.from(groups.keys());
 
   // File Support IT (prioritaire)
   const supportName = allNames.find((n) => SUPPORT_IT_PATTERN.test(n));
 
-  // File "parking" (hors call center) détectée par motif, plus besoin du nom exact
-  const parkingName = allNames.find((n) => PARKING_PATTERN.test(n));
+  // Notre file virtuelle "Hors call center"
+  const parkingName = groups.has(PARKING_LABEL) ? PARKING_LABEL : null;
 
   // Files SAV (bureautique, conso, etc.)
   const savNames = allNames.filter((n) => SAV_PATTERN.test(n));
@@ -873,11 +1306,15 @@ function renderQueues(groups, api, queuesMeta) {
     }
 
     const isSupport = SUPPORT_IT_PATTERN.test(queueName);
-    const isParking = PARKING_PATTERN.test(queueName);
+    const isParking = queueName === PARKING_LABEL;
 
     if (isSupport) {
       section.classList.add('queue-card--priority');
     }
+
+    if (isParking) {
+  section.classList.add('queue-card--parking');
+}
 
     section.dataset.queueId = queueId || '';
 
@@ -935,10 +1372,12 @@ function renderQueues(groups, api, queuesMeta) {
 
     updateHeaderStats();
 
-    meta.appendChild(badgeAgents);
-    meta.appendChild(badgePaused);
-    meta.appendChild(badgeOffline);
-    meta.appendChild(badgeCalls);
+if (!isParking) {
+  meta.appendChild(badgeAgents);
+  meta.appendChild(badgePaused);
+  meta.appendChild(badgeOffline);
+  meta.appendChild(badgeCalls);
+}
 
     // 🔍 Si c'est "Sans file d'attente", on ajoute une barre de recherche
      let searchInput = null;
@@ -961,19 +1400,36 @@ function renderQueues(groups, api, queuesMeta) {
     table.className = 'agents-table';
     table.dataset.queueId = queueId || '';
 
-    const thead = document.createElement('thead');
-    thead.innerHTML = `
-      <tr>
-        <th>NOM</th>
-        <th>EXTENSION</th>
-        <th>ÉTAT</th>
-        <th>APPEL EN COURS</th>
-        <th>SUPERVISION</th>
-        <th>TRANSFERT</th>
-        <th class="col-actions">ACTIONS</th>
-      </tr>
-    `;
-    table.appendChild(thead);
+ const thead = document.createElement('thead');
+
+if (isParking) {
+  // Hors call center : Nom / Extension / Disponibilité / Transfert
+  thead.innerHTML = `
+    <tr>
+      <th>NOM</th>
+      <th>EXTENSION</th>
+      <th>DISPONIBILITÉ</th>
+      <th>TRANSFERT</th>
+      <th>NPD</th>
+    </tr>
+  `;
+} else {
+  // Files ACD classiques
+  thead.innerHTML = `
+    <tr>
+      <th>NOM</th>
+      <th>EXTENSION</th>
+      <th>ÉTAT</th>
+      <th>APPEL EN COURS</th>
+      <th>SUPERVISION</th>
+      <th>TRANSFERT</th>
+      <th>NPD</th>
+      <th class="col-actions">ACTIONS</th>
+    </tr>
+  `;
+}
+
+table.appendChild(thead);
 
     const tbody = document.createElement('tbody');
 
@@ -987,7 +1443,6 @@ function renderQueues(groups, api, queuesMeta) {
       ev.preventDefault();
       const queueIdTargetStr = table.dataset.queueId;
       const queueIdTarget = queueIdTargetStr ? Number(queueIdTargetStr) : null;
-      if (!queueIdTarget) return;
 
       try {
         const data = ev.dataTransfer.getData('application/json');
@@ -996,7 +1451,7 @@ function renderQueues(groups, api, queuesMeta) {
         const agentId = parsed.agentId;
         const fromQueueId = parsed.fromQueueId;
 
-        if (!agentId || !fromQueueId || fromQueueId === queueIdTarget) return;
+         if (!agentId || fromQueueId === queueIdTarget) return;
 
         await moveAgentBetweenQueues(agentId, fromQueueId, queueIdTarget, api);
       } catch (err) {
@@ -1018,7 +1473,7 @@ function renderQueues(groups, api, queuesMeta) {
       return nameA.localeCompare(nameB, 'fr', { sensitivity: 'base' });
     });
 
-    sortedRows.forEach((agent) => {
+        sortedRows.forEach((agent) => {
       const tr = document.createElement('tr');
       if (agent.id != null) {
         tr.dataset.agentId = String(agent.id);
@@ -1028,15 +1483,43 @@ function renderQueues(groups, api, queuesMeta) {
       }
 
       const callsByUser = state.callsByUser || new Map();
-const statusInfo = getStatusInfo(agent);
 
-let callCellHtml = '';
-const callInfo =
-  agent.userUuid && callsByUser.has(agent.userUuid)
-    ? callsByUser.get(agent.userUuid)
-    : null;
+      let statusInfo;
+
+      // File "Hors call center" → on utilise sessions + DND + présence
+      if (isParking && agent.userUuid) {
+        const sessionsMap = state.userSessions || new Map();
+        const dndMap = state.userDnd || new Map();
+        const availabilityMap = state.userAvailability || new Map();
+
+        const hasSession = sessionsMap.get(agent.userUuid) === true;
+        const dndEnabled = dndMap.get(agent.userUuid) === true;
+        const hasPresence = availabilityMap.has(agent.userUuid);
+
+        if (!hasSession) {
+          statusInfo = { text: 'Non connecté', css: 'pill--offline' };
+        } else if (dndEnabled) {
+          statusInfo = { text: 'Ne pas déranger', css: 'pill--dnd' };
+        } else if (hasPresence) {
+          const raw = availabilityMap.get(agent.userUuid);
+          statusInfo = getAvailabilityPill(raw);
+        } else {
+          statusInfo = { text: 'Disponible', css: 'pill--available' };
+        }
+      } else {
+        // Files ACD classiques → status agent (logged / paused / disconnected)
+        statusInfo = getStatusInfo(agent);
+      }
+
+      let callCellHtml = '';
+      const callInfo =
+        agent.userUuid && callsByUser.has(agent.userUuid)
+          ? callsByUser.get(agent.userUuid)
+          : null;
+
 
 if (!callInfo) {
+  // Aucun appel en cours pour cet agent
   callCellHtml = `
     <div class="call-chip call-chip--none">
       <span class="call-chip__number">—</span>
@@ -1044,39 +1527,73 @@ if (!callInfo) {
     </div>
   `;
 } else {
+  // Appel en cours : on affiche direction + numéro + durée
   const label = callInfo.number || 'Appel en cours';
+  const dirIcon =
+    callInfo.direction === 'inbound'
+      ? '<span class="call-chip__dir inbound">⬅️</span>'
+      : '<span class="call-chip__dir outbound">➡️</span>';
+
   callCellHtml = `
     <div class="call-chip call-chip--active" data-call-start="${callInfo.startedAt}">
-      ${callInfo.direction === "inbound"
-  ? '<span class="call-chip__dir inbound">⬅️</span>'
-  : '<span class="call-chip__dir outbound">➡️</span>'}
-<span class="call-chip__number">${label}</span
+      ${dirIcon}
+      <span class="call-chip__number">${label}</span>
       <span class="call-chip__duration">00:00</span>
     </div>
   `;
 }
 
-tr.innerHTML = `
-  <td>${agent.name}</td>
-  <td>${agent.extension || '—'}</td>
-  <td class="col-status">
-    <span class="pill ${statusInfo.css}">${statusInfo.text}</span>
-  </td>
-  <td class="col-callinfo">${callCellHtml}</td>
-  <td class="col-supervision"></td>
-  <td class="col-transfer"></td>
-  <td class="col-actions"></td>
-`;
+
+let supervisionCell = null;
+let transferCell = null;
+let actionsCell = null;
+
+const dndInfo = getDndPill(agent.userUuid || agent.user_uuid);
+
+if (isParking) {
+  // Hors call center : Nom / Extension / Disponibilité / Transfert / DND
+  tr.innerHTML = `
+    <td>${agent.name}</td>
+    <td>${agent.extension || '—'}</td>
+    <td class="col-status">
+      <span class="pill ${statusInfo.css}">${statusInfo.text}</span>
+    </td>
+    <td class="col-transfer"></td>
+    <td class="col-dnd"></td>
+  `;
+  transferCell = tr.querySelector('.col-transfer');
+} else {
+  // Files ACD complètes
+  tr.innerHTML = `
+    <td>${agent.name}</td>
+    <td>${agent.extension || '—'}</td>
+    <td class="col-status">
+      <span class="pill ${statusInfo.css}">${statusInfo.text}</span>
+    </td>
+    <td class="col-callinfo">${callCellHtml}</td>
+    <td class="col-supervision"></td>
+    <td class="col-transfer"></td>
+    <td class="col-dnd"></td>
+    <td class="col-actions"></td>
+  `;
+
+  supervisionCell = tr.querySelector('.col-supervision');
+  transferCell = tr.querySelector('.col-transfer');
+  actionsCell = tr.querySelector('.col-actions');
+}
 
 
-      const supervisionCell = tr.querySelector('.col-supervision');
-      const transferCell = tr.querySelector('.col-transfer');
-      const actionsCell = tr.querySelector('.col-actions');
 
-      tr.dataset.agentId = agent.id || '';
-      tr.dataset.queueId = agent.queueId || '';
 
-      if (agent.id && agent.queueId) {
+tr.dataset.agentId = agent.id || '';
+tr.dataset.queueId = agent.queueId || '';
+
+if (agent.userUuid) {
+  tr.dataset.userUuid = agent.userUuid;
+}
+
+
+      if (agent.id) {
         tr.draggable = true;
 
         tr.addEventListener('dragstart', (ev) => {
@@ -1086,7 +1603,7 @@ tr.innerHTML = `
             'application/json',
             JSON.stringify({
               agentId: agent.id,
-              fromQueueId: agent.queueId,
+              fromQueueId: agent.queueId || null,  // ⬅️ null pour Hors call center
             })
           );
         });
@@ -1097,17 +1614,149 @@ tr.innerHTML = `
       }
 
       // Si pas d'id agent → actions désactivées
-      if (!agent.id) {
-        const pauseBtn = createActionButton('Pause', 'secondary');
-        const loginBtn = createActionButton('Login', 'primary');
-        pauseBtn.disabled = true;
-        loginBtn.disabled = true;
-        actionsCell.appendChild(pauseBtn);
-        actionsCell.appendChild(loginBtn);
-        tbody.appendChild(tr);
+
+
+// --- DND bouton ---
+const dndCell = tr.querySelector('.col-dnd');
+
+// DND bouton (même style que transfert)
+if (dndCell) {
+  const cell = buildDndToggleCell(agent, api);
+  dndCell.replaceWith(cell);
+}
+
+
+// TRANSFERT MOBILE (renvoi inconditionnel, 1 seul bouton ON/OFF)
+if (transferCell) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'transfer-control';
+
+  const input = document.createElement('input');
+  input.type = 'tel';
+  input.placeholder = 'Portable…';
+  input.className = 'transfer-input';
+
+  const toggleBtn = createActionButton('ON', 'primary');
+
+  const getUserUuidFromRow = () => {
+  const row = toggleBtn.closest('tr');
+
+  if (row && row.dataset.userUuid) {
+    return row.dataset.userUuid;
+  }
+
+  // Fallback si on n'a pas encore le <tr>
+  return agent.userUuid || null;
+};
+
+if (!agent.id) {
+  // Pas d'ID agent -> dans Hors call center, on affiche juste la ligne
+  if (!isParking && actionsCell) {
+    const pauseBtn = createActionButton('Pause', 'secondary');
+    const loginBtn = createActionButton('Login', 'primary');
+    pauseBtn.disabled = true;
+    loginBtn.disabled = true;
+    actionsCell.appendChild(pauseBtn);
+    actionsCell.appendChild(loginBtn);
+  }
+  tbody.appendChild(tr);
+  return;
+}
+
+  let forwardEnabled = false;
+  let forwardNumber = '';
+
+  const initialUuid = getUserUuidFromRow();
+  if (initialUuid && state.userForwards && state.userForwards.has(initialUuid)) {
+    const fw = state.userForwards.get(initialUuid);
+    forwardEnabled = !!fw.enabled;
+    forwardNumber = fw.destination || '';
+  }
+
+  const syncForwardUi = () => {
+    input.value = forwardNumber || '';
+    toggleBtn.classList.remove('btn--primary', 'btn--danger');
+
+    if (forwardEnabled) {
+      toggleBtn.textContent = 'OFF';
+      toggleBtn.classList.add('btn--danger');
+    } else {
+      toggleBtn.textContent = 'ON';
+      toggleBtn.classList.add('btn--primary');
+    }
+  };
+
+  syncForwardUi();
+
+  toggleBtn.addEventListener('click', async () => {
+    const userUuid = getUserUuidFromRow();
+    if (!userUuid) {
+      console.warn('[Superviseur] Pas de userUuid pour le transfert', agent);
+      return;
+    }
+
+    if (!forwardEnabled) {
+      const num = input.value.trim();
+      if (!num) {
+        alert('Merci de renseigner un numéro de portable.');
         return;
       }
+      try {
+        setStatus(
+          `Activation du transfert vers ${num} pour ${agent.name}…`,
+          'info'
+        );
+        await setUserMobileForward(userUuid, num, api);
+        forwardEnabled = true;
+        forwardNumber = num;
 
+        if (!state.userForwards) state.userForwards = new Map();
+        state.userForwards.set(userUuid, {
+          enabled: true,
+          destination: num,
+        });
+
+        syncForwardUi();
+        setStatus('Transfert activé.', 'success');
+      } catch (err) {
+        console.error('[Superviseur] Erreur transfert mobile ON', err);
+        setStatus('Erreur transfert mobile.', 'error');
+      }
+    } else {
+      try {
+        setStatus(
+          `Désactivation du transfert mobile pour ${agent.name}…`,
+          'info'
+        );
+        await setUserMobileForward(userUuid, '', api);
+        forwardEnabled = false;
+        forwardNumber = '';
+
+        if (!state.userForwards) state.userForwards = new Map();
+        state.userForwards.set(userUuid, {
+          enabled: false,
+          destination: '',
+        });
+
+        syncForwardUi();
+        setStatus('Transfert désactivé.', 'success');
+      } catch (err) {
+        console.error('[Superviseur] Erreur transfert mobile OFF', err);
+        setStatus('Erreur transfert mobile.', 'error');
+      }
+    }
+  });
+
+  wrapper.appendChild(input);
+  wrapper.appendChild(toggleBtn);
+  transferCell.textContent = '';
+  transferCell.appendChild(wrapper);
+} else if (transferCell) {
+  transferCell.textContent = '—';
+}
+
+
+if (!isParking) {
       // SUPERVISION (Join / Spy / Whisper)
       const joinBtn = createActionButton('Join', 'secondary');
       const spyBtn = createActionButton('Spy', 'secondary');
@@ -1130,105 +1779,6 @@ tr.innerHTML = `
       supervisionCell.appendChild(joinBtn);
       supervisionCell.appendChild(spyBtn);
       supervisionCell.appendChild(whisperBtn);
-
-                  // TRANSFERT MOBILE (renvoi inconditionnel, 1 seul bouton ON/OFF)
-      if (agent.userUuid) {
-        const wrapper = document.createElement('div');
-        wrapper.className = 'transfer-control';
-
-        const input = document.createElement('input');
-        input.type = 'tel';
-        input.placeholder = 'Portable…';
-        input.className = 'transfer-input';
-
-        const toggleBtn = createActionButton('ON', 'primary');
-
-        // État initial basé sur state.userForwards (si disponible)
-        let forwardEnabled = false; // true = renvoi actif
-        let forwardNumber = '';
-
-        if (state.userForwards && state.userForwards.has(agent.userUuid)) {
-          const fw = state.userForwards.get(agent.userUuid);
-          forwardEnabled = !!fw.enabled;
-          forwardNumber = fw.destination || '';
-        }
-
-        const syncForwardUi = () => {
-          input.value = forwardNumber || '';
-
-          toggleBtn.classList.remove('btn--primary', 'btn--danger');
-
-          if (forwardEnabled) {
-            // Renvoi actif -> OFF rouge
-            toggleBtn.textContent = 'OFF';
-            toggleBtn.classList.add('btn--danger');
-          } else {
-            // Pas de renvoi -> ON vert
-            toggleBtn.textContent = 'ON';
-            toggleBtn.classList.add('btn--primary');
-          }
-        };
-
-        syncForwardUi();
-
-        toggleBtn.addEventListener('click', async () => {
-          if (!forwardEnabled) {
-            // Activer le renvoi
-            const num = input.value.trim();
-            if (!num) {
-              alert('Merci de renseigner un numéro de portable.');
-              return;
-            }
-            try {
-              setStatus(
-                `Activation du transfert vers ${num} pour ${agent.name}…`,
-                'info'
-              );
-              await setUserMobileForward(agent.userUuid, num, api);
-              forwardEnabled = true;
-              forwardNumber = num;
-              syncForwardUi();
-              setStatus('Transfert activé.', 'success');
-            } catch (err) {
-              console.error('[Superviseur] Erreur transfert mobile ON', err);
-              alert(
-                'Erreur lors de l’activation du transfert.\n' +
-                  (err.message || '')
-              );
-              setStatus('Erreur transfert mobile.', 'error');
-            }
-          } else {
-            // Désactiver le renvoi
-            try {
-              setStatus(
-                `Désactivation du transfert mobile pour ${agent.name}…`,
-                'info'
-              );
-              await setUserMobileForward(agent.userUuid, '', api);
-              forwardEnabled = false;
-              forwardNumber = '';
-              syncForwardUi();
-              setStatus('Transfert désactivé.', 'success');
-            } catch (err) {
-              console.error('[Superviseur] Erreur transfert mobile OFF', err);
-              alert(
-                'Erreur lors de la désactivation du transfert.\n' +
-                  (err.message || '')
-              );
-              setStatus('Erreur transfert mobile.', 'error');
-            }
-          }
-        });
-
-        wrapper.appendChild(input);
-        wrapper.appendChild(toggleBtn);
-        transferCell.appendChild(wrapper);
-      } else {
-        transferCell.textContent = '—';
-      }
-
-
-
 
       // BOUTON PAUSE / REPRENDRE
       const pauseBtn = createActionButton(
@@ -1331,8 +1881,12 @@ tr.innerHTML = `
 
       actionsCell.appendChild(pauseBtn);
       actionsCell.appendChild(loginBtn);
-      tbody.appendChild(tr);
-    });
+      
+    }
+  
+    tbody.appendChild(tr);
+  
+  });
 
     table.appendChild(tbody);
     body.appendChild(table);
@@ -1352,55 +1906,111 @@ tr.innerHTML = `
       });
     }
 
-    return section;
+            return section;
   };
 
-    // 1) Ligne spéciale : Support IT + file "parking" (à droite)
-  if (supportName || parkingName) {
-    const row = document.createElement('div');
-    row.className = 'queues-row';
+  // -----------------------------------------------------------------
+  // Disposition des cartes :
+  // - toutes les files ACD à gauche (en colonne)
+  // - "Hors call center" à droite (colonne distincte)
+  // -----------------------------------------------------------------
+if (parkingName) {
+    // Layout 2 colonnes
+    const layout = document.createElement('div');
+    layout.className = 'queues-layout';
 
+    // Colonne gauche : toutes les files ACD (Support IT, SAV, autres)
+    const acdCol = document.createElement('div');
+    acdCol.className = 'queues-col queues-col--acd';
+
+    const acdNamesOrdered = [];
+    if (supportName) acdNamesOrdered.push(supportName);
+    acdNamesOrdered.push(...savNames.sort((a, b) => a.localeCompare(b, 'fr')));
+    acdNamesOrdered.push(
+      ...otherNames.sort((a, b) => a.localeCompare(b, 'fr'))
+    );
+
+    const seen = new Set();
+    acdNamesOrdered.forEach((queueName) => {
+      if (!queueName || seen.has(queueName)) return;
+      seen.add(queueName);
+      const rows = groups.get(queueName) || [];
+      acdCol.appendChild(buildQueueCard(queueName, rows));
+    });
+
+    layout.appendChild(acdCol);
+
+    // Colonne droite : "Hors call center"
+    const parkingRows = groups.get(parkingName) || [];
+    const parkingCol = document.createElement('div');
+    parkingCol.className = 'queues-col queues-col--parking';
+    parkingCol.appendChild(buildQueueCard(parkingName, parkingRows));
+
+    layout.appendChild(parkingCol);
+
+       containerEl.appendChild(layout);
+
+    // 🔧 Harmoniser la hauteur :
+    // on force la hauteur TOTALE de la carte "Hors call center"
+    // à être égale à la hauteur de la colonne ACD
+    requestAnimationFrame(() => {
+      const acdHeight = acdCol.offsetHeight;
+      const parkingCard = parkingCol.querySelector('.queue-card');
+      const parkingBody = parkingCol.querySelector('.queue-card__body');
+
+      if (!acdHeight || !parkingCard || !parkingBody) return;
+
+      // "chrome" = header + bordures + padding de la carte
+      const chrome = parkingCard.offsetHeight - parkingBody.offsetHeight;
+      const targetBodyHeight = Math.max(0, acdHeight - chrome);
+
+      parkingBody.style.height = targetBodyHeight + 'px';
+      parkingBody.style.maxHeight = targetBodyHeight + 'px';
+      parkingBody.style.overflowY = 'auto';
+    });
+
+  } else {
+    // Pas de "Hors call center" -> layout classique
+
+    // 1) Ligne Support IT seule
     if (supportName) {
+      const row = document.createElement('div');
+      row.className = 'queues-row';
       const supportRows = groups.get(supportName) || [];
       row.appendChild(buildQueueCard(supportName, supportRows));
+      containerEl.appendChild(row);
     }
 
-    if (parkingName) {
-      const parkingRows = groups.get(parkingName) || [];
-      row.appendChild(buildQueueCard(parkingName, parkingRows));
+    // 2) Ligne SAV (toutes les SAV côte à côte)
+    if (savNames.length) {
+      const savRow = document.createElement('div');
+      savRow.className = 'queues-row';
+
+      savNames
+        .sort((a, b) => a.localeCompare(b, 'fr'))
+        .forEach((queueName) => {
+          const rows = groups.get(queueName) || [];
+          savRow.appendChild(buildQueueCard(queueName, rows));
+        });
+
+      containerEl.appendChild(savRow);
     }
 
-    containerEl.appendChild(row);
-  }
-
-  // 2) Ligne SAV : toutes les files SAV sur une même rangée
-  if (savNames.length) {
-    const savRow = document.createElement('div');
-    savRow.className = 'queues-row';
-
-    savNames
+    // 3) Autres files (une carte par ligne)
+    otherNames
       .sort((a, b) => a.localeCompare(b, 'fr'))
       .forEach((queueName) => {
         const rows = groups.get(queueName) || [];
-        savRow.appendChild(buildQueueCard(queueName, rows));
+        containerEl.appendChild(buildQueueCard(queueName, rows));
       });
-
-    containerEl.appendChild(savRow);
   }
 
-  // 3) Autres files (une carte par ligne)
-  otherNames
-    .sort((a, b) => a.localeCompare(b, 'fr'))
-    .forEach((queueName) => {
-      const rows = groups.get(queueName) || [];
-      containerEl.appendChild(buildQueueCard(queueName, rows));
-    });
 
   // Met à jour la durée des appels en temps réel
-  startCallDurationTicker()
-
-
+  startCallDurationTicker();
 }
+
+
 
 
 
@@ -1474,64 +2084,91 @@ async function loadData(api, { silent = false } = {}) {
     const { from, until } = buildStatsPeriod();
 
 
-const [agentsRaw, queuesRaw, usersRaw, queuesStatsRaw, callsRaw] =
-  await Promise.all([
-    api('/api/agentd/1.0/agents?recurse=true', { method: 'GET' }),
-    api('/api/confd/1.1/queues?recurse=true', { method: 'GET' }),
-    api('/api/confd/1.1/users?recurse=true', { method: 'GET' }),
-    api(
-      `/api/call-logd/1.0/queues/statistics?from=${encodeURIComponent(
-        from
-      )}&until=${encodeURIComponent(until)}`,
-      { method: 'GET' }
-    ).catch((e) => {
-      console.warn(
-        '[Superviseur] Impossible de charger les stats call-logd :',
-        e
-      );
-      return null;
-    }),
-    api('/api/calld/1.0/calls', { method: 'GET' }).catch((e) => {
-      console.warn(
-        '[Superviseur] Impossible de charger les appels en cours :',
-        e
-      );
-      return null;
-    }),
-  ]);
-
-    console.log('[Superviseur] Agents reçus', agentsRaw);
-    console.log('[Superviseur] Queues reçues', queuesRaw);
-    console.log('[Superviseur] Utilisateurs reçus', usersRaw);
-    console.log('[Superviseur] Stats queues reçues', queuesStatsRaw);
-
-    const { groups, queuesMeta } = groupAgentsByQueue(
-      queuesRaw,
-      usersRaw,
-      agentsRaw
-      
+const [
+  agentsRaw,
+  queuesRaw,
+  usersRaw,
+  queuesStatsRaw,
+  callsRaw,
+  presencesRaw,
+] = await Promise.all([
+  api('/api/agentd/1.0/agents?recurse=true', { method: 'GET' }),
+  api('/api/confd/1.1/queues?recurse=true', { method: 'GET' }),
+  api('/api/confd/1.1/users?recurse=true', { method: 'GET' }),
+  api(
+    `/api/call-logd/1.0/queues/statistics?from=${encodeURIComponent(
+      from
+    )}&until=${encodeURIComponent(until)}`,
+    { method: 'GET' }
+  ).catch((e) => {
+    console.warn(
+      '[Superviseur] Impossible de charger les stats call-logd :',
+      e
     );
-
-    state.groups = groups;
-    state.queuesMeta = queuesMeta;
-// Appels en cours → map userUuid -> { number, direction, startedAt }
-state.callsByUser = await buildCallsByUserMap_EUC(callsRaw, api);
-
-        // Collecte des users pour charger leurs renvois inconditionnels
-    const userUuidSet = new Set();
-    for (const rows of groups.values()) {
-      rows.forEach((agent) => {
-        if (agent.userUuid) {
-          userUuidSet.add(agent.userUuid);
-        }
-      });
+    return null;
+  }),
+  api('/api/calld/1.0/calls', { method: 'GET' }).catch((e) => {
+    console.warn(
+      '[Superviseur] Impossible de charger les appels en cours :',
+      e
+    );
+    return null;
+  }),
+  // 🔥 Nouvelle requête : vraie présence utilisateur
+  api('/api/chatd/1.0/users/presences?recurse=true', { method: 'GET' }).catch(
+    (e) => {
+      console.warn(
+        '[Superviseur] Impossible de charger les présences (chatd) :',
+        e
+      );
+      return null;
     }
+  ),
+]);
 
-    // Renvois inconditionnels actuels (enabled + numéro)
-state.userForwards = await loadUserForwards(api, userUuidSet);
+console.log('[Superviseur] Agents reçus', agentsRaw);
+console.log('[Superviseur] Queues reçues', queuesRaw);
+console.log('[Superviseur] Utilisateurs reçus', usersRaw);
+console.log('[Superviseur] Stats queues reçues', queuesStatsRaw);
+console.log('[Superviseur] Présences reçues', presencesRaw);
 
-// Stats files 9h–18h depuis call-logd
-const queueStatsMap = new Map();
+// 🟢 Présence (chatd) : available / away / unavailable / …
+  state.userAvailability = buildUserAvailabilityFromPresences(presencesRaw);
+
+  // Groupes / files / meta
+  const { groups, queuesMeta } = groupAgentsByQueue(
+    queuesRaw,
+    usersRaw,
+    agentsRaw
+  );
+
+  state.groups = groups;
+  state.queuesMeta = queuesMeta;
+
+  // Collecte des users pour DND + renvois inconditionnels
+  const userUuidSet = new Set();
+  for (const rows of groups.values()) {
+    rows.forEach((agent) => {
+      if (agent.userUuid) {
+        userUuidSet.add(agent.userUuid);
+      }
+    });
+  }
+
+  // Appels en cours → map userUuid -> { number, direction, startedAt }
+  state.callsByUser = await buildCallsByUserMap_EUC(callsRaw, api);
+
+  // Sessions (auth) – connecté / non connecté
+  state.userSessions = await buildUserSessionsForParking(groups, api);
+
+  // DND pour tous les users (confd)
+  state.userDnd = await loadUserDnd(api, userUuidSet);
+
+  // Renvois inconditionnels actuels (enabled + numéro)
+  state.userForwards = await loadUserForwards(api, userUuidSet);
+
+  // Stats files 9h–18h depuis call-logd
+  const queueStatsMap = new Map();
 
 if (queuesStatsRaw) {
   const items = Array.isArray(queuesStatsRaw.items)
@@ -1642,20 +2279,17 @@ function connectRealtime(baseUrl, token, api) {
   }
 
   // --- EVENTS APPELS ---
-  if (
+ if (
   ev === "call.created" ||
   ev === "call.updated" ||
   ev === "call.answered" ||
   ev === "call.hangup"
 ) {
-    const callsRaw = await api('/api/calld/1.0/calls');
-state.callsByUser = await buildCallsByUserMap_EUC(callsRaw, api);
-    renderQueues(state.groups, api, state.queuesMeta);
-
-    // ⏱ relancer la mise à jour du timer !!
-    startCallDurationTicker();
-
-    return;
+  const callsRaw = await api('/api/calld/1.0/calls');
+  state.callsByUser = await buildCallsByUserMap_EUC(callsRaw, api);
+  renderQueues(state.groups, api, state.queuesMeta);
+  startCallDurationTicker();
+  return;
 }
 
 
