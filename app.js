@@ -1794,13 +1794,15 @@ if (transferCell) {
 
 if (!isParking) {
       // SUPERVISION (Join / Spy / Whisper)
-      const joinBtn = createActionButton('Join', 'secondary');
-      const spyBtn = createActionButton('Spy', 'secondary');
-      const whisperBtn = createActionButton('Whisper', 'secondary');
+const joinBtn = createActionButton('Join', 'secondary');
+const spyBtn = createActionButton('Spy', 'secondary');
+const whisperBtn = createActionButton('Whisper', 'secondary');
 
-      [joinBtn, spyBtn, whisperBtn].forEach((btn) => {
-        btn.disabled = !agent.logged;
-      });
+// ➕ on marque ces 3 boutons comme boutons de supervision
+[joinBtn, spyBtn, whisperBtn].forEach((btn) => {
+  btn.disabled = !agent.logged;
+  btn.classList.add('btn-supervision');
+});
 
       joinBtn.addEventListener('click', () =>
         superviseAgentCall('join', agent, api)
