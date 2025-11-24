@@ -952,6 +952,37 @@ async function setUserMobileForward(userUuid, number, api) {
   );
 }
 
+function syncAllForwardControlsForUser(userUuid, forwardEnabled, forwardNumber) {
+  if (!userUuid || !containerEl) return;
+
+  const cells = containerEl.querySelectorAll(
+    `tr[data-user-uuid="${userUuid}"] .col-transfer`
+  );
+
+  cells.forEach((td) => {
+    const input = td.querySelector('.transfer-input');
+    const btn = td.querySelector('.transfer-control .btn');
+
+    if (input) {
+      input.value = forwardNumber || '';
+    }
+
+    if (btn) {
+      btn.classList.remove('btn--primary', 'btn--danger');
+
+      if (forwardEnabled) {
+        // Transfert actif → OFF rouge
+        btn.textContent = 'OFF';
+        btn.classList.add('btn--danger');
+      } else {
+        // Transfert inactif → ON vert
+        btn.textContent = 'ON';
+        btn.classList.add('btn--primary');
+      }
+    }
+  });
+}
+
 
 function syncAllDndButtonsForUser(userUuid, dndEnabled) {
   // Pas d’UUID ou pas de conteneur → rien à faire
@@ -1625,6 +1656,14 @@ if (dndCell) {
   dndCell.replaceWith(cell);
 }
 
+if (!agent.id && !isParking && actionsCell && !actionsCell.hasChildNodes()) {
+  const pauseBtn = createActionButton('Pause', 'secondary');
+  const loginBtn = createActionButton('Login', 'primary');
+  pauseBtn.disabled = true;
+  loginBtn.disabled = true;
+  actionsCell.appendChild(pauseBtn);
+  actionsCell.appendChild(loginBtn);
+}
 
 // TRANSFERT MOBILE (renvoi inconditionnel, 1 seul bouton ON/OFF)
 if (transferCell) {
@@ -1639,121 +1678,118 @@ if (transferCell) {
   const toggleBtn = createActionButton('ON', 'primary');
 
   const getUserUuidFromRow = () => {
-  const row = toggleBtn.closest('tr');
-
-  if (row && row.dataset.userUuid) {
-    return row.dataset.userUuid;
-  }
-
-  // Fallback si on n'a pas encore le <tr>
-  return agent.userUuid || null;
-};
-
-if (!agent.id) {
-  // Pas d'ID agent -> dans Hors call center, on affiche juste la ligne
-  if (!isParking && actionsCell) {
-    const pauseBtn = createActionButton('Pause', 'secondary');
-    const loginBtn = createActionButton('Login', 'primary');
-    pauseBtn.disabled = true;
-    loginBtn.disabled = true;
-    actionsCell.appendChild(pauseBtn);
-    actionsCell.appendChild(loginBtn);
-  }
-  tbody.appendChild(tr);
-  return;
-}
-
-  let forwardEnabled = false;
-  let forwardNumber = '';
-
-  const initialUuid = getUserUuidFromRow();
-  if (initialUuid && state.userForwards && state.userForwards.has(initialUuid)) {
-    const fw = state.userForwards.get(initialUuid);
-    forwardEnabled = !!fw.enabled;
-    forwardNumber = fw.destination || '';
-  }
-
-  const syncForwardUi = () => {
-    input.value = forwardNumber || '';
-    toggleBtn.classList.remove('btn--primary', 'btn--danger');
-
-    if (forwardEnabled) {
-      toggleBtn.textContent = 'OFF';
-      toggleBtn.classList.add('btn--danger');
-    } else {
-      toggleBtn.textContent = 'ON';
-      toggleBtn.classList.add('btn--primary');
+    const row = toggleBtn.closest('tr');
+    if (row && row.dataset.userUuid) {
+      return row.dataset.userUuid;
     }
+    // Fallback : userUuid porté par l’agent (Hors call center / ACD)
+    return agent.userUuid || null;
   };
 
-  syncForwardUi();
+  const initialUuid = getUserUuidFromRow();
 
-  toggleBtn.addEventListener('click', async () => {
-    const userUuid = getUserUuidFromRow();
-    if (!userUuid) {
-      console.warn('[Superviseur] Pas de userUuid pour le transfert', agent);
-      return;
+  // ❌ Pas de userUuid -> on ne peut pas gérer le forward
+  if (!initialUuid) {
+    transferCell.textContent = '—';
+  } else {
+    let forwardEnabled = false;
+    let forwardNumber = '';
+
+    if (state.userForwards && state.userForwards.has(initialUuid)) {
+      const fw = state.userForwards.get(initialUuid);
+      forwardEnabled = !!fw.enabled;
+      forwardNumber = fw.destination || '';
     }
 
-    if (!forwardEnabled) {
-      const num = input.value.trim();
-      if (!num) {
-        alert('Merci de renseigner un numéro de portable.');
+    const syncForwardUi = () => {
+      input.value = forwardNumber || '';
+      toggleBtn.classList.remove('btn--primary', 'btn--danger');
+
+      if (forwardEnabled) {
+        toggleBtn.textContent = 'OFF';
+        toggleBtn.classList.add('btn--danger');
+      } else {
+        toggleBtn.textContent = 'ON';
+        toggleBtn.classList.add('btn--primary');
+      }
+    };
+
+    syncForwardUi();
+
+    toggleBtn.addEventListener('click', async () => {
+      const userUuid = getUserUuidFromRow();
+      if (!userUuid) {
+        console.warn('[Superviseur] Pas de userUuid pour le transfert', agent);
         return;
       }
-      try {
-        setStatus(
-          `Activation du transfert vers ${num} pour ${agent.name}…`,
-          'info'
-        );
-        await setUserMobileForward(userUuid, num, api);
-        forwardEnabled = true;
-        forwardNumber = num;
 
-        if (!state.userForwards) state.userForwards = new Map();
-        state.userForwards.set(userUuid, {
-          enabled: true,
-          destination: num,
-        });
+      if (!forwardEnabled) {
+        const num = input.value.trim();
+        if (!num) {
+          alert('Merci de renseigner un numéro de portable.');
+          return;
+        }
+        try {
+          setStatus(
+            `Activation du transfert vers ${num} pour ${agent.name}…`,
+            'info'
+          );
+          await setUserMobileForward(userUuid, num, api);
+          forwardEnabled = true;
+          forwardNumber = num;
 
-        syncForwardUi();
-        setStatus('Transfert activé.', 'success');
-      } catch (err) {
-        console.error('[Superviseur] Erreur transfert mobile ON', err);
-        setStatus('Erreur transfert mobile.', 'error');
+          if (!state.userForwards) state.userForwards = new Map();
+          state.userForwards.set(userUuid, {
+            enabled: true,
+            destination: num,
+          });
+
+          syncForwardUi();
+          // si tu as déjà syncAllForwardControlsForUser, tu peux aussi appeler :
+          // syncAllForwardControlsForUser(userUuid, forwardEnabled, forwardNumber);
+
+          setStatus('Transfert activé.', 'success');
+        } catch (err) {
+          console.error('[Superviseur] Erreur transfert mobile ON', err);
+          setStatus('Erreur transfert mobile.', 'error');
+        }
+      } else {
+        try {
+          setStatus(
+            `Désactivation du transfert mobile pour ${agent.name}…`,
+            'info'
+          );
+          await setUserMobileForward(userUuid, '', api);
+          forwardEnabled = false;
+          forwardNumber = '';
+
+          if (!state.userForwards) state.userForwards = new Map();
+          state.userForwards.set(userUuid, {
+            enabled: false,
+            destination: '',
+          });
+
+          syncForwardUi();
+          // idem ici si tu veux propager :
+          // syncAllForwardControlsForUser(userUuid, forwardEnabled, forwardNumber);
+
+          setStatus('Transfert désactivé.', 'success');
+        } catch (err) {
+          console.error('[Superviseur] Erreur transfert mobile OFF', err);
+          setStatus('Erreur transfert mobile.', 'error');
+        }
       }
-    } else {
-      try {
-        setStatus(
-          `Désactivation du transfert mobile pour ${agent.name}…`,
-          'info'
-        );
-        await setUserMobileForward(userUuid, '', api);
-        forwardEnabled = false;
-        forwardNumber = '';
+    });
 
-        if (!state.userForwards) state.userForwards = new Map();
-        state.userForwards.set(userUuid, {
-          enabled: false,
-          destination: '',
-        });
-
-        syncForwardUi();
-        setStatus('Transfert désactivé.', 'success');
-      } catch (err) {
-        console.error('[Superviseur] Erreur transfert mobile OFF', err);
-        setStatus('Erreur transfert mobile.', 'error');
-      }
-    }
-  });
-
-  wrapper.appendChild(input);
-  wrapper.appendChild(toggleBtn);
-  transferCell.textContent = '';
-  transferCell.appendChild(wrapper);
+    wrapper.appendChild(input);
+    wrapper.appendChild(toggleBtn);
+    transferCell.textContent = '';
+    transferCell.appendChild(wrapper);
+  }
 } else if (transferCell) {
   transferCell.textContent = '—';
 }
+
 
 
 if (!isParking) {
