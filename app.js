@@ -2558,7 +2558,7 @@ if (ev === 'agent_status_update' || ev === 'agent.status.update') {
 // -------------------------------------------------------------------
 
 function startAutoRefresh(api) {
-  // 🔁 Bouton refresh manuel : handler attaché une seule fois
+  // 🔁 Bouton refresh manuel uniquement
   if (refreshBtn && !refreshBtn.dataset.bound) {
     refreshBtn.dataset.bound = '1';
 
@@ -2579,27 +2579,15 @@ function startAutoRefresh(api) {
     });
   }
 
-  // ⏱️ Auto-refresh : un seul interval global
-  if (autoRefreshTimer) return;
+  // 🔇 On désactive complètement l’auto-refresh interval
+  if (autoRefreshTimer) {
+    clearInterval(autoRefreshTimer);
+    autoRefreshTimer = null;
+  }
 
-  autoRefreshTimer = setInterval(async () => {
-    // 👉 si le WebSocket est ouvert, on ne fait **rien**
-    if (state.websocket && state.websocket.readyState === WebSocket.OPEN) {
-      return;
-    }
-
-    if (isAutoRefreshing) return;
-    isAutoRefreshing = true;
-
-    try {
-      await loadData(api, { silent: true });
-    } catch (err) {
-      console.error('[Superviseur] Erreur auto-refresh :', err);
-    } finally {
-      isAutoRefreshing = false;
-    }
-  }, AUTO_REFRESH_INTERVAL_MS); // 15000 ms ~= 15s
+  // Et SURTOUT : pas de setInterval ici 👇
 }
+
 
 
 
