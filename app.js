@@ -2393,10 +2393,11 @@ function connectRealtime(baseUrl, token, api) {
     console.log('[Superviseur] WS event :', ev, payload);
 
     // --- EVENTS STATUT UTILISATEUR ---
-    if (ev === 'user.status.update') {
-      await loadData(api, { silent: true });
-      return;
-    }
+    // Pour l'instant on n'en fait rien pour éviter les reloads automatiques
+if (ev === 'user.status.update') {
+  console.log('[Superviseur] WS user.status.update (ignoré, pas de reload auto)');
+  return;
+}
 
       // --- EVENTS AGENTS (login/logout) ---
 if (
@@ -2514,8 +2515,9 @@ if (ev === 'agent_status_update' || ev === 'agent.status.update') {
       return;
     }
 
-    // Fallback : reload "debouncé"
-    scheduleRealtimeReload(api);
+    // Fallback : on ignore les autres événements pour éviter les reloads trop fréquents
+console.log('[Superviseur] WS event ignoré (pas de reload auto) :', ev, payload);
+return;
   };
 
   ws.onclose = (ev) => {
