@@ -2583,6 +2583,11 @@ function startAutoRefresh(api) {
   if (autoRefreshTimer) return;
 
   autoRefreshTimer = setInterval(async () => {
+    // 👉 si le WebSocket est ouvert, on ne fait **rien**
+    if (state.websocket && state.websocket.readyState === WebSocket.OPEN) {
+      return;
+    }
+
     if (isAutoRefreshing) return;
     isAutoRefreshing = true;
 
@@ -2593,8 +2598,9 @@ function startAutoRefresh(api) {
     } finally {
       isAutoRefreshing = false;
     }
-  }, AUTO_REFRESH_INTERVAL_MS);
+  }, AUTO_REFRESH_INTERVAL_MS); // 15000 ms ~= 15s
 }
+
 
 
 
