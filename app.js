@@ -202,30 +202,54 @@ function createApiClient(baseUrl, token) {
       headers,
     });
 
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      console.error('[Superviseur] Erreur API', res.status, url, text);
+      if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    let json = null;
+    try {
+      json = text ? JSON.parse(text) : null;
+    } catch {
+      // pas grave si ce n'est pas du JSON
+    }
 
-      // 🔐 Sécurité token expiré côté API REST
-      if (res.status === 401 || res.status === 403) {
-        const lower = (text || '').toLowerCase();
+    // 🧊 Cas particulier : user inconnu sur /auth/.../sessions
+    const isUnknownUserSessions404 =
+      res.status === 404 &&
+      json &&
+      json.error_id === 'unknown-user' &&
+      path.startsWith('/api/auth/0.1/users/') &&
+      path.endsWith('/sessions');
 
-        // Beaucoup de stacks Wazo renvoient "expired" ou "token" dans le message
-        if (lower.includes('expired') || lower.includes('token')) {
-          setStatus('Session expirée — rechargement…', 'error');
-          setTimeout(() => {
-            window.location.reload();
-          }, 800);
-          return; // on stoppe ici
-        }
+    if (isUnknownUserSessions404) {
+      console.warn(
+        '[Superviseur] Utilisateur inconnu pour les sessions auth, marqué comme non connecté :',
+        path
+      );
+      // on fait comme s'il n'avait aucune session
+      return { items: [] };
+    }
 
-        throw new Error(
-          `Accès refusé (${res.status}). Vérifiez les droits Call Center / Agents.`
-        );
+    console.error('[Superviseur] Erreur API', res.status, url, text);
+
+    // 🔐 Sécurité token expiré côté API REST
+    if (res.status === 401 || res.status === 403) {
+      const lower = (text || '').toLowerCase();
+
+      if (lower.includes('expired') || lower.includes('token')) {
+        setStatus('Session expirée — rechargement…', 'error');
+        setTimeout(() => {
+          window.location.reload();
+        }, 800);
+        return;
       }
 
-      throw new Error(`Erreur API ${res.status}: ${text || res.statusText}`);
+      throw new Error(
+        `Accès refusé (${res.status}). Vérifiez les droits Call Center / Agents.`
+      );
     }
+
+    throw new Error(`Erreur API ${res.status}: ${text || res.statusText}`);
+  }
+
 
     if (res.status === 204) return null;
 
@@ -804,6 +828,17 @@ async function moveAgentBetweenQueues(agentId, fromQueueId, toQueueId, api) {
   }
 }
 
+function findAgentInStateById(agentId) {
+  if (!state.groups || agentId == null) return null;
+
+  for (const agents of state.groups.values()) {
+    const found = agents.find((a) => String(a.id) === String(agentId));
+    if (found) return found;
+  }
+  return null;
+}
+
+
 
 // Synchronise toutes les lignes DOM d'un même agent (cas : agent dans plusieurs files)
 function syncAgentDom(agent) {
@@ -1090,7 +1125,14 @@ const getUserUuidFromRow = () => {
     syncAllDndButtonsForUser(userUuid, targetState);
 
     // 🔄 met à jour sa disponibilité dans toutes les files
-    syncAgentDom({ id: agent.id, userUuid });
+    const realAgent = [...state.groups.values()]
+  .flat()
+  .find(a => a.id === agent.id || a.userUuid === userUuid);
+
+if (realAgent) {
+  // On met à jour uniquement DND
+  syncAgentDom(realAgent);
+}
 
     setStatus('DND mis à jour.', 'success');
   } catch (err) {
@@ -1823,51 +1865,66 @@ const whisperBtn = createActionButton('Whisper', 'secondary');
         agent.paused ? 'Reprendre' : 'Pause',
         'secondary'
       );
+
+
       pauseBtn.disabled = !agent.logged;
       pauseBtn.classList.add('agent-pause-btn');
 
+pauseBtn.classList.toggle(
+  'btn--pause-active',
+  agent.logged && agent.paused
+);
+
       pauseBtn.addEventListener('click', async () => {
-        try {
-          pauseBtn.disabled = true;
+  const wasPaused = !!agent.paused;
+  const newPaused = !wasPaused;
 
-          const agentNumber = agent.number || agent.extension;
-          if (!agentNumber) {
-            throw new Error(
-              `Numéro d'agent introuvable pour ${agent.name} (id=${agent.id}).`
-            );
-          }
+  // 🔸 Mise à jour immédiate de l’UI (rapide, sans attendre l’API)
+  agent.paused = newPaused;
+  syncAgentDom(agent);
 
-          const basePath = `/api/agentd/1.0/agents/by-number/${agentNumber}`;
-          const path = agent.paused
-            ? `${basePath}/unpause`
-            : `${basePath}/pause`;
+  try {
+    pauseBtn.disabled = true;
 
-          const options = { method: 'POST' };
+    const agentNumber = agent.number || agent.extension;
+    if (!agentNumber) {
+      throw new Error(
+        `Numéro d'agent introuvable pour ${agent.name} (id=${agent.id}).`
+      );
+    }
 
-          if (!agent.paused) {
-            options.body = { reason: 'plugin-superviseur' };
-          }
+    const basePath = `/api/agentd/1.0/agents/by-number/${agentNumber}`;
+    const path = newPaused
+      ? `${basePath}/pause`
+      : `${basePath}/unpause`;
 
-          console.log('[Superviseur] PAUSE/UNPAUSE', path, options, agent);
-          await api(path, options);
+    const options = { method: 'POST' };
+    if (newPaused) {
+      options.body = { reason: 'plugin-superviseur' };
+    }
 
-          agent.paused = !agent.paused;
+    console.log('[Superviseur] PAUSE/UNPAUSE', path, options, agent);
+    await api(path, options);
 
-          syncAgentDom(agent);
-          updateHeaderStats();
-          flashUpdating();
-        } catch (err) {
-          console.error('[Superviseur] Erreur pause/reprendre', err);
-          alert(
-            'Erreur lors du changement de pause de cet agent.\n' +
-              (err.message || '')
-          );
-        } finally {
-          pauseBtn.disabled = !agent.logged;
-        }
-      });
+    updateHeaderStats();
+    flashUpdating();
+  } catch (err) {
+    console.error('[Superviseur] Erreur pause/reprendre', err);
+    alert(
+      'Erreur lors du changement de pause de cet agent.\n' +
+        (err.message || '')
+    );
 
-      // BOUTON LOGIN / LOGOUT
+    // ⏪ En cas d’erreur, on revient à l’ancien état
+    agent.paused = wasPaused;
+    syncAgentDom(agent);
+  } finally {
+    pauseBtn.disabled = !agent.logged;
+  }
+});
+
+
+            // BOUTON LOGIN / LOGOUT
       const loginBtn = document.createElement('button');
       loginBtn.type = 'button';
       loginBtn.textContent = agent.logged ? 'Logout' : 'Login';
@@ -1875,19 +1932,29 @@ const whisperBtn = createActionButton('Whisper', 'secondary');
       loginBtn.classList.add('agent-login-btn');
 
       loginBtn.addEventListener('click', async () => {
+        const wasLogged = !!agent.logged;
+        const newLogged = !wasLogged;
+
+        // 🔸 Mise à jour immédiate de l’UI (comme pour Pause)
+        agent.logged = newLogged;
+        if (!newLogged) {
+          // si on se délogue → plus en pause
+          agent.paused = false;
+        }
+        syncAgentDom(agent);
+
         try {
           loginBtn.disabled = true;
 
           const basePath = `/api/agentd/1.0/agents/by-id/${agent.id}`;
-          const isLoggingIn = !agent.logged;
-
-          const path = isLoggingIn
+          const path = newLogged
             ? `${basePath}/login`
             : `${basePath}/logoff`;
 
           const options = { method: 'POST' };
 
-          if (isLoggingIn) {
+          if (newLogged) {
+            // On se logue → il faut extension + context
             const { extension, context } = await resolveAgentLoginTarget(
               agent,
               api
@@ -1898,12 +1965,7 @@ const whisperBtn = createActionButton('Whisper', 'secondary');
           console.log('[Superviseur] LOGIN/LOGOFF', path, options, agent);
           await api(path, options);
 
-          agent.logged = !agent.logged;
-          if (!agent.logged) {
-            agent.paused = false;
-          }
-
-          syncAgentDom(agent);
+          // API OK → juste maj stats + petit flash
           updateHeaderStats();
           flashUpdating();
         } catch (err) {
@@ -1912,6 +1974,13 @@ const whisperBtn = createActionButton('Whisper', 'secondary');
             'Erreur lors du login/logout de cet agent.\n' +
               (err.message || '')
           );
+
+          // ⏪ Rollback en cas d’erreur
+          agent.logged = wasLogged;
+          if (!agent.logged) {
+            agent.paused = false;
+          }
+          syncAgentDom(agent);
         } finally {
           loginBtn.disabled = false;
         }
@@ -1919,6 +1988,7 @@ const whisperBtn = createActionButton('Whisper', 'secondary');
 
       actionsCell.appendChild(pauseBtn);
       actionsCell.appendChild(loginBtn);
+
       
     }
   
@@ -2248,6 +2318,7 @@ renderQueues(groups, api, queuesMeta);
   }
 }
 
+
 // -------------------------------------------------------------------
 // WebSocket temps réel
 // -------------------------------------------------------------------
@@ -2285,80 +2356,195 @@ function connectRealtime(baseUrl, token, api) {
 
   ws.onopen = () => {
     console.log('[Superviseur] WebSocket ouvert');
+
+    try {
+      // 1️⃣ Abonnement à tous les events
+      ws.send(
+        JSON.stringify({
+          op: 'subscribe',
+          data: { event_name: '*' },
+        }),
+      );
+
+      // 2️⃣ Démarrage du flux
+      ws.send(JSON.stringify({ op: 'start' }));
+    } catch (e) {
+      console.error('[Superviseur] Erreur envoi subscribe/start WS', e);
+    }
   };
 
   ws.onmessage = async (event) => {
-  let data;
-  try {
-    data = JSON.parse(event.data);
-  } catch (e) {
-    return;
-  }
+    let data;
+    try {
+      data = JSON.parse(event.data);
+    } catch (e) {
+      return;
+    }
 
-  const ev = data.event_type || data.type || data.op;
-  const payload = data.data || data;
+    // Messages de contrôle (init / subscribe / start avec "code")
+    if (data.op && typeof data.code === 'number') {
+      console.log('[Superviseur] WS control :', data);
+      return;
+    }
 
-  console.log("[Superviseur] WS event :", ev, payload);
+    const ev = data.event_type || data.name || data.type || data.op;
+    const payload = data.data || data;
 
-  if (ev === "user.status.update") {
-    await loadData(api, { silent: true });
-    return;
-}
+    console.log('[Superviseur] WS event :', ev, payload);
 
-  // --- EVENTS AGENTS ---
-  if (ev === "agent.logged_in" || ev === "agent.logged_out") {
-    await loadData(api, { silent: true });
-    return;
-  }
+    // --- EVENTS STATUT UTILISATEUR ---
+    if (ev === 'user.status.update') {
+      await loadData(api, { silent: true });
+      return;
+    }
 
-  if (ev === "queue.member.paused" || ev === "queue.member.unpaused") {
-    await loadData(api, { silent: true });
-    return;
-  }
-
-  // --- EVENTS APPELS ---
- if (
-  ev === "call.created" ||
-  ev === "call.updated" ||
-  ev === "call.answered" ||
-  ev === "call.hangup"
+      // --- EVENTS AGENTS (login/logout) ---
+if (
+  ev === 'agent.logged_in' ||
+  ev === 'agent.logged_out' ||
+  ev === 'agent_logged_in' ||
+  ev === 'agent_logged_out'
 ) {
-  const callsRaw = await api('/api/calld/1.0/calls');
-  state.callsByUser = await buildCallsByUserMap_EUC(callsRaw, api);
-  renderQueues(state.groups, api, state.queuesMeta);
-  startCallDurationTicker();
+  const p = payload || {};
+
+  const agentId =
+    p.agent_id ??
+    p.agent?.id ??
+    p.agent?.agent_id;
+
+  const isLogged =
+    ev === 'agent.logged_in' || ev === 'agent_logged_in';
+
+  if (agentId != null) {
+    const agent = findAgentInStateById(agentId);
+
+    if (agent) {
+      agent.logged = isLogged;
+
+      if (!agent.logged) {
+        // on nettoie la pause si l’agent est déloggé
+        agent.paused = false;
+      }
+
+      // Mise à jour de toutes les lignes de cet agent
+      syncAgentDom(agent);
+      return; // ✅ pas de loadData complet, pas d'updateHeaderStats ici
+    }
+  }
+
+  // si vraiment on ne trouve pas l’agent -> reload de secours
+  scheduleRealtimeReload(api);
   return;
 }
 
 
-  // fallback
-  scheduleRealtimeReload(api);
-};
+  // --- EVENT AGENT STATUS UPDATE (backend envoie logged_in / logged_out) ---
+if (ev === 'agent_status_update' || ev === 'agent.status.update') {
+  const p = payload || {};
+  const agentId = p.agent_id ?? p.agent?.id ?? p.agent?.agent_id;
+  const status = p.status;
 
+  if (agentId != null) {
+    const agent = findAgentInStateById(agentId);
 
-ws.onclose = (ev) => {
-  console.warn('[Superviseur] WebSocket fermé', ev.code, ev.reason);
+    if (agent) {
+      if (status === 'logged_out') {
+        agent.logged = false;
+        agent.paused = false;
+      } else if (status === 'logged_in') {
+        agent.logged = true;
+      }
 
-  // 🔥 Token expiré → rechargement automatique
-  if (ev.code === 4003) {
-    console.error('[Superviseur] Token expiré → rechargement de la page...');
-    setStatus('Session expirée — rechargement…', 'error');
-
-    setTimeout(() => {
-      window.location.reload();
-    }, 800);
-
-    return;
+      syncAgentDom(agent);
+      return; // ✅ pas de updateHeaderStats ici non plus
+    }
   }
 
-  // Reconnexion automatique (déco réseau etc.)
-  setTimeout(() => {
-    if (state.api) {
-      state.websocket = connectRealtime(baseUrl, token, api);
-    }
-  }, 1200);
-};
+  scheduleRealtimeReload(api);
+  return;
+}
 
+
+
+    if (
+  ev === 'queue.member.paused' ||
+  ev === 'queue.member.unpaused' ||
+  ev === 'agent_paused' ||
+  ev === 'agent_unpaused'
+) {
+  // On essaye de ne mettre à jour QUE l'agent concerné
+  const p = payload || {};
+  const agentId =
+    p.agent_id ??
+    p.member?.agent_id ??
+    p.queue_member?.agent_id ??
+    p.agent?.id ??
+    p.agent?.agent_id;
+
+  const shouldBePaused =
+    ev === 'queue.member.paused' || ev === 'agent_paused';
+
+  if (agentId != null) {
+    const agent = findAgentInStateById(agentId);
+
+    if (agent) {
+      agent.paused = shouldBePaused;
+      syncAgentDom(agent); // ✅ on met à jour uniquement la/les lignes de cet agent
+      return;
+    }
+  }
+
+  // Fallback si vraiment on ne trouve pas l'agent
+  scheduleRealtimeReload(api);
+  return;
+}
+
+
+    // --- EVENTS APPELS ---
+    if (
+      ev === 'call.created' ||
+      ev === 'call.updated' ||
+      ev === 'call.answered' ||
+      ev === 'call.hangup'
+    ) {
+      const callsRaw = await api('/api/calld/1.0/calls');
+      state.callsByUser = await buildCallsByUserMap_EUC(callsRaw, api);
+      renderQueues(state.groups, api, state.queuesMeta);
+      startCallDurationTicker();
+      return;
+    }
+
+    // Fallback : reload "debouncé"
+    scheduleRealtimeReload(api);
+  };
+
+  ws.onclose = (ev) => {
+    console.warn('[Superviseur] WebSocket fermé', ev.code, ev.reason);
+
+    // 4003 = token expiré
+    if (ev.code === 4003) {
+      console.error(
+        '[Superviseur] Token expiré → rechargement de la page...',
+      );
+      setStatus('Session expirée — rechargement…', 'error');
+      setTimeout(() => window.location.reload(), 800);
+      return;
+    }
+
+    // 4004 = erreur de protocole
+    if (ev.code === 4004) {
+      console.error(
+        '[Superviseur] Erreur de protocole WebSocket (4004) – vérifier les messages envoyés',
+      );
+    }
+
+    // Reconnexion automatique (déco réseau, reboot stack, etc.)
+    setTimeout(() => {
+      if (state.api) {
+        state.websocket = connectRealtime(baseUrl, token, api);
+      }
+    }, 3000);
+  };
 
   ws.onerror = (err) => {
     console.error('[Superviseur] WebSocket error', err);
@@ -2372,29 +2558,31 @@ ws.onclose = (ev) => {
 // -------------------------------------------------------------------
 
 function startAutoRefresh(api) {
+  // 🔁 Bouton refresh manuel : handler attaché une seule fois
+  if (refreshBtn && !refreshBtn.dataset.bound) {
+    refreshBtn.dataset.bound = '1';
 
-  if (refreshBtn) {
-  refreshBtn.addEventListener('click', async () => {
-    try {
-      refreshBtn.classList.add('spin');
-      setStatus("Rafraîchissement…", "info");
-      await loadData(state.api, { silent: true });
-      setStatus("Données mises à jour.", "success");
-    } catch (err) {
-      console.error("Erreur refresh manuel :", err);
-      setStatus("Erreur refresh.", "error");
-    } finally {
-      setTimeout(() => refreshBtn.classList.remove('spin'), 400);
-    }
-  });
-}
+    refreshBtn.addEventListener('click', async () => {
+      try {
+        refreshBtn.classList.add('spin');
+        setStatus('Rafraîchissement…', 'info');
+
+        await loadData(state.api, { silent: true });
+
+        setStatus('Données mises à jour.', 'success');
+      } catch (err) {
+        console.error('Erreur refresh manuel :', err);
+        setStatus('Erreur refresh.', 'error');
+      } finally {
+        setTimeout(() => refreshBtn.classList.remove('spin'), 400);
+      }
+    });
+  }
+
+  // ⏱️ Auto-refresh : un seul interval global
   if (autoRefreshTimer) return;
 
   autoRefreshTimer = setInterval(async () => {
-    if (state.websocket && state.websocket.readyState === WebSocket.OPEN) {
-      return;
-    }
-
     if (isAutoRefreshing) return;
     isAutoRefreshing = true;
 
@@ -2407,6 +2595,8 @@ function startAutoRefresh(api) {
     }
   }, AUTO_REFRESH_INTERVAL_MS);
 }
+
+
 
 // -------------------------------------------------------------------
 // Initialisation du plugin (format E-UC commercial)
