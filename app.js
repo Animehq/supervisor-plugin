@@ -53,6 +53,8 @@ const state = {
   usersByUuid: new Map(),
 usersByExt: new Map(),
 directoryByNumber: new Map(),
+  directoryCache: new Map(),    // num normalisé -> nom (lookup dird)
+  dirdProfile: null,            // profil dird à utiliser (ex: "default")
   websocket: null,
   realtimeReloadScheduled: false,
   // Nouvel état pour les appels
@@ -1380,7 +1382,12 @@ function startCallDurationTicker() {
     document.querySelectorAll('.call-chip[data-call-start]').forEach((chip) => {
       const start = Number(chip.dataset.callStart);
       if (!start) return;
-      const secs = Math.max(0, Math.floor((now - start) / 1000));
+            let secs = Math.floor((now - start) / 1000);
+      if (secs < 0) secs = 0;
+
+      // 💡 Hack UX : dès qu'on commence à compter, on force au moins 1 seconde
+      // pour éviter l'effet "bloqué à 00:00" pendant 1 seconde.
+      if (secs === 0) secs = 1;
       const mm = String(Math.floor(secs / 60)).padStart(2, '0');
       const ss = String(secs % 60).padStart(2, '0');
 
@@ -1395,11 +1402,12 @@ function startCallDurationTicker() {
   state.callDurationTimer = setInterval(update, 1000);
 }
 
-async function buildCallsByUserMap_EUC(callsRaw, api, previousMap = new Map()){
+async function buildCallsByUserMap_EUC(callsRaw, api) {
   const map = new Map();
   if (!callsRaw) return map;
 
   const list = normalizeCollection(callsRaw);
+  const previousMap = state.callsByUser || new Map();
 
   for (const call of list) {
     const data = call.data || call || {};
@@ -1414,27 +1422,40 @@ async function buildCallsByUserMap_EUC(callsRaw, api, previousMap = new Map()){
 
     if (!userUuid) continue;
 
-     // Extension de l'agent (pour pouvoir l'exclure)
+    // --- On ne garde que les appels DÉCROCHÉS ---
+    // On essaye plusieurs indices possibles de "answered"
+    const status = (data.status || '').toLowerCase();
+    const isAnswered =
+      !!data.answered_at ||
+      status === 'up' ||
+      status === 'answered' ||
+      status === 'in-progress';
+
+    if (!isAnswered) {
+      // Appel encore en sonnerie ou déjà terminé → pas de chrono
+      continue;
+    }
+
+    // --- Extension de l’agent (pour exclure son propre numéro) ---
     const userInfo = state.usersByUuid && state.usersByUuid.get(userUuid);
     const userExt = userInfo && userInfo.extension
       ? String(userInfo.extension)
       : null;
 
-    // --- Quel numéro afficher ? ---
-    // On veut l'AUTRE partie de l'appel (jamais l'extension de l'agent)
+    // --- Quel numéro afficher ? (toujours l’AUTRE partie) ---
     let candidates;
 
     if (data.direction === 'outbound') {
-      // Appel sortant : on montre le numéro appelé (le 06...)
+      // Sortant : numéro appelé
       candidates = [
         data.remote_callee_id_number,
         data.callee_id_number,
         data.other_party_number,
         data.dialed_extension,
-        data.caller_id_number,      // fallback ultime (CLI trunk)
+        data.caller_id_number,
       ];
     } else if (data.direction === 'inbound') {
-      // Appel entrant : on montre le numéro de l'appelant externe
+      // Entrant : numéro de l’appelant externe
       candidates = [
         data.remote_caller_id_number,
         data.caller_id_number,
@@ -1442,7 +1463,7 @@ async function buildCallsByUserMap_EUC(callsRaw, api, previousMap = new Map()){
         data.display_caller_name,
       ];
     } else {
-      // Interne / inconnu → on tente de deviner
+      // Interne / inconnu : on essaye de deviner
       candidates = [
         data.other_party_number,
         data.remote_caller_id_number,
@@ -1455,53 +1476,45 @@ async function buildCallsByUserMap_EUC(callsRaw, api, previousMap = new Map()){
     }
 
     let number = null;
-
     for (const cand of candidates) {
       if (!cand) continue;
       const s = String(cand).trim();
       if (!s) continue;
-
-      // On saute l'extension de l'agent : on veut "l'autre côté"
+      // On saute l’extension de l’agent
       if (userExt && s === userExt) continue;
-
       number = s;
       break;
     }
 
- const displayNumber = resolveNumberLabel(number || '');
+    const displayNumber = resolveNumberLabel(number || '');
 
-// --- Date de début pour le timer ---
-// On essaie d'abord de réutiliser l'ancien startedAt (pour ne pas le reset)
-let startedAtMs = null;
-const prev = previousMap.get(userUuid);
-if (prev && Number.isFinite(prev.startedAt)) {
-  startedAtMs = prev.startedAt;
-}
+    // --- Date de début pour le timer ---
+    // On se cale sur started_at (moment où l'appel est établi côté Wazo).
+    // Si l'horloge du serveur est en avance, on "clampe" à maintenant.
+    let startedAtMs = null;
+    const now = Date.now();
 
-// Si l'API nous donne un vrai timestamp de début, on l'utilise
-const tsCandidate = data.started_at || data.answered_at || data.creation_time || null;
-if (tsCandidate) {
-  const ts = Date.parse(tsCandidate);
-  if (Number.isFinite(ts)) {
-    startedAtMs = ts;
-  }
-}
+    if (data.started_at) {
+      const ts = Date.parse(data.started_at);
+      if (Number.isFinite(ts) && ts <= now) {
+        // started_at valide et pas dans le futur
+        startedAtMs = ts;
+      }
+    }
 
-// Si on n'a toujours rien (première fois qu'on voit cet appel sans timestamp fiable),
-// on prend "maintenant" une seule fois
-if (!Number.isFinite(startedAtMs)) {
-  startedAtMs = Date.now();
-}
+    // Si le serveur nous donne un started_at dans le futur
+    // ou rien du tout, on démarre le chrono au moment où
+    // l'appel apparaît dans le plugin.
+    if (!Number.isFinite(startedAtMs)) {
+      startedAtMs = now;
+    }
 
-map.set(userUuid, {
-  number: displayNumber,
-  rawNumber: number,
-  direction: data.direction === 'inbound' ? 'inbound' : 'outbound',
-  startedAt: startedAtMs,
-});
-
-
-
+    map.set(userUuid, {
+      number: displayNumber,
+      rawNumber: number,
+      direction: data.direction === 'inbound' ? 'inbound' : 'outbound',
+      startedAt: startedAtMs,
+    });
   }
 
   console.log('[Superviseur] callsByUser EUC construit', map);
@@ -1520,6 +1533,9 @@ function normalizePhone(num) {
     s = '0' + s.slice(3);
   } else if (s.startsWith('0033') && s.length > 4) {
     s = '0' + s.slice(4);
+  } else if (s.length === 11 && s.startsWith('336')) {
+    // Cas parfois stocké en 336XXXXXXXX → 06XXXXXXXX
+    s = '0' + s.slice(2);
   }
 
   return s;
@@ -1531,12 +1547,11 @@ function resolveNumberLabel(rawNumber) {
   const raw = String(rawNumber);
   const num = normalizePhone(raw);
 
-  // 1) Annuaire externe (directories confd, ex : "Annuaire adexgroup")
-  if (state.directoryByNumber && state.directoryByNumber.has(num)) {
-    const entry = state.directoryByNumber.get(num);
-    if (entry && entry.name) {
-      // On conserve l'affichage du numéro tel que vu dans l'appel
-      return raw + ' – ' + entry.name;
+  // 1) Cache d'annuaire dird (lookup à la volée)
+  if (state.directoryCache && state.directoryCache.has(num)) {
+    const name = state.directoryCache.get(num);
+    if (name) {
+      return raw + ' – ' + name;
     }
   }
 
@@ -1548,74 +1563,123 @@ function resolveNumberLabel(rawNumber) {
     }
   }
 
+  // Sinon, on affiche juste le numéro
   return raw;
 }
 
+
+
 async function loadAllDirectoriesEntries(api) {
-  const directoryMap = new Map(); // normalizedNumber -> { name }
-
-  try {
-    const dirsRes = await api('/api/confd/1.1/directories', { method: 'GET' });
-    const dirs = dirsRes.items || [];
-
-    for (const dir of dirs) {
-      try {
-        const entriesRes = await api(
-          `/api/confd/1.1/directories/${encodeURIComponent(dir.uuid)}/entries`,
-          { method: 'GET' }
-        );
-
-        const items =
-          entriesRes.items ||
-          entriesRes.entries ||
-          entriesRes.rows ||
-          [];
-
-        for (const entry of items) {
-          const numbers = new Set();
-
-          // Champs classiques
-          if (entry.number) numbers.add(entry.number);
-          if (entry.phone_number) numbers.add(entry.phone_number);
-          if (entry.tel) numbers.add(entry.tel);
-
-          // Listes possibles (juste au cas où)
-          if (Array.isArray(entry.numbers)) {
-            entry.numbers.forEach((n) => numbers.add(n));
-          }
-          if (Array.isArray(entry.phone_numbers)) {
-            entry.phone_numbers.forEach((n) => numbers.add(n));
-          }
-
-          const name =
-            entry.name ||
-            entry.display_name ||
-            `${entry.firstname || ''} ${entry.lastname || ''}`.trim();
-
-          if (!name) continue;
-
-          for (const rawNum of numbers) {
-            const norm = normalizePhone(rawNum);
-            if (!norm) continue;
-
-            // Si plusieurs annuaires ont le même numéro, on garde le premier
-            if (!directoryMap.has(norm)) {
-              directoryMap.set(norm, { name });
-            }
-          }
-        }
-      } catch (e) {
-        console.warn('[Superviseur] Impossible de lire directory', dir, e);
-      }
-    }
-  } catch (e) {
-    console.warn('[Superviseur] Impossible de charger les directories', e);
-  }
-
-  console.log('[Superviseur] Directory merged map =', directoryMap);
-  return directoryMap;
+  // Ancien mécanisme basé sur confd désactivé (CORS / E-UC).
+  // On utilise maintenant dird avec lookup à la volée.
+  console.log('[Superviseur] Annuaire confd désactivé, utilisation de dird en lookup.');
+  return new Map();
 }
 
+
+async function ensureDirdProfile() {
+  // Profil déjà déterminé
+  if (state.dirdProfile !== null) {
+    return state.dirdProfile; // peut être null si on n'a rien trouvé
+  }
+
+  if (!state.api) return null;
+
+  try {
+    const res = await state.api('/api/dird/0.1/profiles?recurse=true', {
+      method: 'GET',
+    });
+
+    const items = (res && res.items) || [];
+    if (!items.length) {
+      console.warn('[Superviseur] Aucun profil dird disponible');
+      state.dirdProfile = null;
+      return null;
+    }
+
+    // On privilégie "default" si présent, sinon le premier
+    const defaultProfile = items.find((p) => p.name === 'default');
+    const chosen = defaultProfile || items[0];
+
+    state.dirdProfile = chosen && chosen.name ? chosen.name : null;
+    console.log('[Superviseur] Profil dird sélectionné :', state.dirdProfile);
+
+    return state.dirdProfile;
+  } catch (e) {
+    console.warn('[Superviseur] Impossible de charger les profils dird', e);
+    state.dirdProfile = null;
+    return null;
+  }
+}
+
+async function enrichCallCellWithDirectory(td, rawNumber) {
+  if (!rawNumber || !state.api) return;
+
+  const raw = String(rawNumber);
+  const norm = normalizePhone(raw);
+  if (!norm) return;
+
+  // Initialise le cache si besoin
+  if (!state.directoryCache) {
+    state.directoryCache = new Map();
+  }
+
+  // Déjà en cache ?
+  if (state.directoryCache.has(norm)) {
+    const cached = state.directoryCache.get(norm);
+    if (!cached) return; // on a déjà tenté → pas trouvé
+
+    const span = td.querySelector('.call-chip__number');
+    if (span) {
+      span.textContent = `${raw} – ${cached}`;
+    }
+    return;
+  }
+
+  const profile = await ensureDirdProfile();
+  if (!profile) return;
+
+  let res;
+  try {
+    res = await state.api(
+      `/api/dird/0.1/directories/lookup/${encodeURIComponent(
+        profile
+      )}?term=${encodeURIComponent(norm)}`,
+      { method: 'GET' }
+    );
+  } catch (e) {
+    console.warn('[Superviseur] Lookup dird échoué pour', norm, e);
+    return;
+  }
+
+  const items = (res && res.items) || [];
+  if (!items.length) {
+    // On mémorise "rien trouvé" pour éviter de spammer l'API
+    state.directoryCache.set(norm, null);
+    return;
+  }
+
+  const contact = items[0];
+
+  const name =
+    contact.name ||
+    contact.display_name ||
+    `${contact.firstname || ''} ${contact.lastname || ''}`.trim();
+
+  if (!name) {
+    state.directoryCache.set(norm, null);
+    return;
+  }
+
+  // On met à jour le cache
+  state.directoryCache.set(norm, name);
+
+  // Et on met à jour la pastille si elle est encore là
+  const span = td.querySelector('.call-chip__number');
+  if (span) {
+    span.textContent = `${raw} – ${name}`;
+  }
+}
 
 
 
@@ -2424,9 +2488,15 @@ function refreshCallCellForUser(userUuid) {
 
   rows.forEach((row) => {
     // 1) Met à jour la colonne "APPEL EN COURS"
-    const td = row.querySelector('.col-call');
+    const td = row.querySelector('.col-call');   // 👉 il manquait CETTE LIGNE
     if (td) {
       td.innerHTML = html;
+
+      // 🔍 Enrichir le label avec l'annuaire dird (Annuaire Adexgroup, etc.)
+      if (callInfo && callInfo.rawNumber && typeof enrichCallCellWithDirectory === 'function') {
+        // Appel asynchrone, on ne bloque pas le rendu
+        enrichCallCellWithDirectory(td, callInfo.rawNumber);
+      }
     }
 
     // 2) Recalcule le statut (DISPONIBILITÉ / ÉTAT) via syncAgentDom
@@ -2449,6 +2519,7 @@ function refreshCallCellForUser(userUuid) {
     }
   });
 }
+
 
 
 
@@ -2596,7 +2667,7 @@ console.log('[Superviseur] Présences reçues', presencesRaw);
 
 
   // 🔎 Charger tous les annuaires (confd) une fois au chargement
-  state.directoryByNumber = await loadAllDirectoriesEntries(api);
+  //state.directoryByNumber = await loadAllDirectoriesEntries(api);
   
   // Appels en cours → map userUuid -> { number, direction, startedAt }
   state.callsByUser = await buildCallsByUserMap_EUC(callsRaw, api);
