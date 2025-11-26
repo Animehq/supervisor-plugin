@@ -291,7 +291,8 @@ function buildUsersMaps(usersRaw) {
   const usersByUuid = new Map();
   const usersByExt = new Map();
   state.usersByUuid = usersByUuid;
-state.usersByExt = usersByExt;
+  state.usersByExt = usersByExt;
+
 
   users.forEach((user) => {
     const displayName =
@@ -385,9 +386,6 @@ function buildUserAvailabilityFromPresences(presencesRaw) {
   console.log('[Superviseur] userAvailability (chatd)', map);
   return map;
 }
-
-
-
 
 
 // agents → maps (par extension / id / uuid)
@@ -901,18 +899,23 @@ function syncAgentDom(agent) {
       card && card.classList.contains('queue-card--parking');
 
     if (isParkingRow && agent.userUuid) {
-      const sessionsMap = state.userSessions || new Map();
-      const dndMap = state.userDnd || new Map();
+      const sessionsMap     = state.userSessions     || new Map();
+      const dndMap          = state.userDnd          || new Map();
       const availabilityMap = state.userAvailability || new Map();
+      const callsByUser     = state.callsByUser      || new Map();
 
-      const hasSession = sessionsMap.get(agent.userUuid) === true;
-      const dndEnabled = dndMap.get(agent.userUuid) === true;
+      const hasSession  = sessionsMap.get(agent.userUuid) === true;
+      const dndEnabled  = dndMap.get(agent.userUuid) === true;
       const hasPresence = availabilityMap.has(agent.userUuid);
+      const hasCall     = callsByUser.has(agent.userUuid); // 👈 user en appel ?
 
       if (!hasSession) {
         statusInfo = { text: 'Non connecté', css: 'pill--offline' };
       } else if (dndEnabled) {
         statusInfo = { text: 'Ne pas déranger', css: 'pill--dnd' };
+      } else if (hasCall) {
+        // 👇 nouveau statut En appel / OnCall
+        statusInfo = { text: 'En appel', css: 'pill--oncall' };
       } else if (hasPresence) {
         const raw = availabilityMap.get(agent.userUuid);
         statusInfo = getAvailabilityPill(raw);
@@ -922,6 +925,7 @@ function syncAgentDom(agent) {
     } else {
       statusInfo = getStatusInfo(agent);
     }
+
 
     if (statusTd && statusInfo) {
       statusTd.innerHTML = `<span class="pill ${statusInfo.css}">${statusInfo.text}</span>`;
@@ -1391,7 +1395,7 @@ function startCallDurationTicker() {
   state.callDurationTimer = setInterval(update, 1000);
 }
 
-async function buildCallsByUserMap_EUC(callsRaw, api) {
+async function buildCallsByUserMap_EUC(callsRaw, api, previousMap = new Map()){
   const map = new Map();
   if (!callsRaw) return map;
 
@@ -1410,74 +1414,129 @@ async function buildCallsByUserMap_EUC(callsRaw, api) {
 
     if (!userUuid) continue;
 
+     // Extension de l'agent (pour pouvoir l'exclure)
+    const userInfo = state.usersByUuid && state.usersByUuid.get(userUuid);
+    const userExt = userInfo && userInfo.extension
+      ? String(userInfo.extension)
+      : null;
+
     // --- Quel numéro afficher ? ---
-let number = null;
+    // On veut l'AUTRE partie de l'appel (jamais l'extension de l'agent)
+    let candidates;
 
-if (data.direction === 'outbound') {
-  // Appel sortant : on affiche le numéro appelé
-  number =
-    data.other_party_number ||       // numéro distant
-    data.remote_callee_id_number ||
-    data.callee_id_number ||
-    data.callee_exten ||             // si appel interne
-    data.dialed_extension ||
-    data.caller_id_number ||
-    null;
-} else if (data.direction === 'inbound') {
-  // Appel entrant : on affiche le numéro de l'appelant externe
-  number =
-    data.remote_caller_id_number ||
-    data.caller_id_number ||
-    data.other_party_number ||
-    data.display_caller_name ||
-    null;
-} else {
-  // Fallback si direction inconnue
-  number =
-    data.other_party_number ||
-    data.caller_id_number ||
-    data.callee_id_number ||
-    null;
+    if (data.direction === 'outbound') {
+      // Appel sortant : on montre le numéro appelé (le 06...)
+      candidates = [
+        data.remote_callee_id_number,
+        data.callee_id_number,
+        data.other_party_number,
+        data.dialed_extension,
+        data.caller_id_number,      // fallback ultime (CLI trunk)
+      ];
+    } else if (data.direction === 'inbound') {
+      // Appel entrant : on montre le numéro de l'appelant externe
+      candidates = [
+        data.remote_caller_id_number,
+        data.caller_id_number,
+        data.other_party_number,
+        data.display_caller_name,
+      ];
+    } else {
+      // Interne / inconnu → on tente de deviner
+      candidates = [
+        data.other_party_number,
+        data.remote_caller_id_number,
+        data.remote_callee_id_number,
+        data.caller_id_number,
+        data.callee_id_number,
+        data.callee_exten,
+        data.dialed_extension,
+      ];
+    }
+
+    let number = null;
+
+    for (const cand of candidates) {
+      if (!cand) continue;
+      const s = String(cand).trim();
+      if (!s) continue;
+
+      // On saute l'extension de l'agent : on veut "l'autre côté"
+      if (userExt && s === userExt) continue;
+
+      number = s;
+      break;
+    }
+
+ const displayNumber = resolveNumberLabel(number || '');
+
+// --- Date de début pour le timer ---
+// On essaie d'abord de réutiliser l'ancien startedAt (pour ne pas le reset)
+let startedAtMs = null;
+const prev = previousMap.get(userUuid);
+if (prev && Number.isFinite(prev.startedAt)) {
+  startedAtMs = prev.startedAt;
 }
-const displayNumber = resolveNumberLabel(number || '');
 
-    // --- Date de début pour le timer ---
-    let startedAtMs = null;
+// Si l'API nous donne un vrai timestamp de début, on l'utilise
+const tsCandidate = data.started_at || data.answered_at || data.creation_time || null;
+if (tsCandidate) {
+  const ts = Date.parse(tsCandidate);
+  if (Number.isFinite(ts)) {
+    startedAtMs = ts;
+  }
+}
 
-    if (data.started_at) {
-      const ts = Date.parse(data.started_at);
-      if (Number.isFinite(ts)) startedAtMs = ts;
-    } else if (data.creation_time) {
-      const ts = Date.parse(data.creation_time);
-      if (Number.isFinite(ts)) startedAtMs = ts;
-    }
+// Si on n'a toujours rien (première fois qu'on voit cet appel sans timestamp fiable),
+// on prend "maintenant" une seule fois
+if (!Number.isFinite(startedAtMs)) {
+  startedAtMs = Date.now();
+}
 
-    // Si on n'a vraiment rien, on prend "maintenant"
-    if (!Number.isFinite(startedAtMs)) {
-      startedAtMs = Date.now();
-    }
-
-    map.set(userUuid, {
-  number: displayNumber,         // ce qu’on affiche
-  rawNumber: number,             // numéro brut au cas où
+map.set(userUuid, {
+  number: displayNumber,
+  rawNumber: number,
   direction: data.direction === 'inbound' ? 'inbound' : 'outbound',
   startedAt: startedAtMs,
 });
+
+
+
   }
 
   console.log('[Superviseur] callsByUser EUC construit', map);
   return map;
 }
 
+function normalizePhone(num) {
+  if (!num) return '';
+  let s = String(num).trim();
+
+  // On enlève espaces, tirets, points, parenthèses
+  s = s.replace(/[\s.\-\(\)]/g, '');
+
+  // Cas FR : +33 / 0033 -> 0X…
+  if (s.startsWith('+33') && s.length > 3) {
+    s = '0' + s.slice(3);
+  } else if (s.startsWith('0033') && s.length > 4) {
+    s = '0' + s.slice(4);
+  }
+
+  return s;
+}
+
+
 function resolveNumberLabel(rawNumber) {
   if (!rawNumber) return '';
-  const num = String(rawNumber);
+  const raw = String(rawNumber);
+  const num = normalizePhone(raw);
 
-  // 1) Annuaire externe (si tu l’alimentes plus tard)
+  // 1) Annuaire externe (directories confd, ex : "Annuaire adexgroup")
   if (state.directoryByNumber && state.directoryByNumber.has(num)) {
     const entry = state.directoryByNumber.get(num);
     if (entry && entry.name) {
-      return num + ' – ' + entry.name;
+      // On conserve l'affichage du numéro tel que vu dans l'appel
+      return raw + ' – ' + entry.name;
     }
   }
 
@@ -1485,12 +1544,78 @@ function resolveNumberLabel(rawNumber) {
   if (state.usersByExt && state.usersByExt.has(num)) {
     const user = state.usersByExt.get(num);
     if (user && user.name) {
-      return num + ' – ' + user.name;
+      return raw + ' – ' + user.name;
     }
   }
 
-  return num;
+  return raw;
 }
+
+async function loadAllDirectoriesEntries(api) {
+  const directoryMap = new Map(); // normalizedNumber -> { name }
+
+  try {
+    const dirsRes = await api('/api/confd/1.1/directories', { method: 'GET' });
+    const dirs = dirsRes.items || [];
+
+    for (const dir of dirs) {
+      try {
+        const entriesRes = await api(
+          `/api/confd/1.1/directories/${encodeURIComponent(dir.uuid)}/entries`,
+          { method: 'GET' }
+        );
+
+        const items =
+          entriesRes.items ||
+          entriesRes.entries ||
+          entriesRes.rows ||
+          [];
+
+        for (const entry of items) {
+          const numbers = new Set();
+
+          // Champs classiques
+          if (entry.number) numbers.add(entry.number);
+          if (entry.phone_number) numbers.add(entry.phone_number);
+          if (entry.tel) numbers.add(entry.tel);
+
+          // Listes possibles (juste au cas où)
+          if (Array.isArray(entry.numbers)) {
+            entry.numbers.forEach((n) => numbers.add(n));
+          }
+          if (Array.isArray(entry.phone_numbers)) {
+            entry.phone_numbers.forEach((n) => numbers.add(n));
+          }
+
+          const name =
+            entry.name ||
+            entry.display_name ||
+            `${entry.firstname || ''} ${entry.lastname || ''}`.trim();
+
+          if (!name) continue;
+
+          for (const rawNum of numbers) {
+            const norm = normalizePhone(rawNum);
+            if (!norm) continue;
+
+            // Si plusieurs annuaires ont le même numéro, on garde le premier
+            if (!directoryMap.has(norm)) {
+              directoryMap.set(norm, { name });
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('[Superviseur] Impossible de lire directory', dir, e);
+      }
+    }
+  } catch (e) {
+    console.warn('[Superviseur] Impossible de charger les directories', e);
+  }
+
+  console.log('[Superviseur] Directory merged map =', directoryMap);
+  return directoryMap;
+}
+
 
 
 
@@ -2262,9 +2387,10 @@ if (parkingName) {
 
 async function refreshCallsFromApi(api) {
   try {
-    const callsRaw = await api('/api/calld/1.0/calls');
-    const oldMap = state.callsByUser || new Map();
-    const newMap = await buildCallsByUserMap_EUC(callsRaw, api);
+const callsRaw = await api('/api/calld/1.0/calls');
+const oldMap = state.callsByUser || new Map();
+const newMap = await buildCallsByUserMap_EUC(callsRaw, api, oldMap);
+
     state.callsByUser = newMap;
 
     const affected = new Set();
@@ -2288,7 +2414,7 @@ function refreshCallCellForUser(userUuid) {
 
   const callInfo = state.callsByUser.get(userUuid) || null;
 
-  // Toutes les lignes de cet user
+  // Toutes les lignes de cet user (ACD + Hors call center)
   const rows = containerEl.querySelectorAll(
     `tr[data-user-uuid="${userUuid}"]`
   );
@@ -2297,10 +2423,29 @@ function refreshCallCellForUser(userUuid) {
   const html = buildCallChipHtml(callInfo);
 
   rows.forEach((row) => {
-    // ⚠️ On cible bien la bonne colonne !
+    // 1) Met à jour la colonne "APPEL EN COURS"
     const td = row.querySelector('.col-call');
     if (td) {
       td.innerHTML = html;
+    }
+
+    // 2) Recalcule le statut (DISPONIBILITÉ / ÉTAT) via syncAgentDom
+    let agent = null;
+
+    const agentId = row.dataset.agentId;
+    if (agentId) {
+      agent = findAgentInStateById(agentId);
+    }
+
+    if (!agent) {
+      // fallback par userUuid (surtout utile pour Hors call center)
+      agent = [...state.groups.values()]
+        .flat()
+        .find(a => a.userUuid === userUuid);
+    }
+
+    if (agent) {
+      syncAgentDom(agent);
     }
   });
 }
@@ -2449,6 +2594,10 @@ console.log('[Superviseur] Présences reçues', presencesRaw);
     });
   }
 
+
+  // 🔎 Charger tous les annuaires (confd) une fois au chargement
+  state.directoryByNumber = await loadAllDirectoriesEntries(api);
+  
   // Appels en cours → map userUuid -> { number, direction, startedAt }
   state.callsByUser = await buildCallsByUserMap_EUC(callsRaw, api);
 

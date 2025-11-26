@@ -1098,5 +1098,7 @@ body.is-dark .transfer-control .btn--secondary {
   border: 1px solid transparent;
 }
 .pill--oncall {
-  background-color: #f59e0b; /* ou la couleur que tu veux */
+  /* style que tu veux, ex : */
+  background-color: #a24ef0;
+  color: #fff;
 }
