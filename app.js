@@ -1711,22 +1711,28 @@ table.appendChild(thead);
 
       let statusInfo;
 
-      // File "Hors call center" → sessions + DND + présence
+      // File "Hors call center" → sessions + DND + présence + appels en cours
       if (isParking && agent.userUuid) {
-        const sessionsMap = state.userSessions || new Map();
-        const dndMap = state.userDnd || new Map();
+        const sessionsMap     = state.userSessions     || new Map();
+        const dndMap          = state.userDnd          || new Map();
         const availabilityMap = state.userAvailability || new Map();
+        const callsByUser     = state.callsByUser      || new Map();
 
-        const hasSession = sessionsMap.get(agent.userUuid) === true;
-        const dndEnabled = dndMap.get(agent.userUuid) === true;
+        const hasSession  = sessionsMap.get(agent.userUuid) === true;
+        const dndEnabled  = dndMap.get(agent.userUuid) === true;
         const hasPresence = availabilityMap.has(agent.userUuid);
+        const hasCall     = callsByUser.has(agent.userUuid); // 👈 user en appel ?
 
         if (!hasSession) {
           statusInfo = { text: 'Non connecté', css: 'pill--offline' };
         } else if (dndEnabled) {
           statusInfo = { text: 'Ne pas déranger', css: 'pill--dnd' };
+        } else if (hasCall) {
+          // 👇 nouveau statut En appel / OnCall
+          statusInfo = { text: 'En appel', css: 'pill--oncall' };
         } else if (hasPresence) {
           const raw = availabilityMap.get(agent.userUuid);
+          // Ici, raw peut valoir "available", "away", "busy", "invisible", etc.
           statusInfo = getAvailabilityPill(raw);
         } else {
           statusInfo = { text: 'Disponible', css: 'pill--available' };
@@ -1735,6 +1741,7 @@ table.appendChild(thead);
         // Files ACD classiques → status agent (logged / paused / disconnected)
         statusInfo = getStatusInfo(agent);
       }
+
 
       // 💬 Appel en cours (map userUuid -> callInfo)
       const callInfo =
@@ -2716,44 +2723,49 @@ if (
     }
 
     // ======================================================
-// X) Présence / disponibilité (chatd_presence_updated)
-// ======================================================
-if (ev === 'chatd_presence_updated') {
-  const p = payload || {};
-  const userUuid =
-    p.user_uuid || p.userUuid || p.uuid || p.id || null;
+    // X) Présence / disponibilité (chatd_presence_updated)
+    // ======================================================
+    if (
+      evRaw === 'chatd_presence_updated' ||   // nom brut venant du WS
+      ev === 'chatd.presence.updated'        // nom normalisé (avec les points)
+    ) {
+      const p = payload || {};
+      const userUuid =
+        p.user_uuid || p.userUuid || p.uuid || p.id || null;
 
-  if (!userUuid) return;
+      if (!userUuid) return;
 
-  // Même logique que buildUserAvailabilityFromPresences mais pour un seul objet
-  let value =
-    p.state ||
-    p.status ||
-    p.availability ||
-    (p.presence &&
-      (p.presence.state ||
-       p.presence.status ||
-       p.presence.availability)) ||
-    null;
+      // Même logique que buildUserAvailabilityFromPresences mais pour un seul objet
+      let value =
+        p.state ||
+        p.status ||
+        p.availability ||
+        (p.presence &&
+          (p.presence.state ||
+           p.presence.status ||
+           p.presence.availability)) ||
+        null;
 
-  if (!value && typeof p.dnd === 'boolean') {
-    value = p.dnd ? 'dnd' : 'available';
-  }
-  if (!value && typeof p.invisible === 'boolean' && p.invisible) {
-    value = 'invisible';
-  }
+      if (!value && typeof p.dnd === 'boolean') {
+        value = p.dnd ? 'dnd' : 'available';
+      }
+      if (!value && typeof p.invisible === 'boolean' && p.invisible) {
+        value = 'invisible';
+      }
 
-  if (!state.userAvailability) {
-    state.userAvailability = new Map();
-  }
-  state.userAvailability.set(userUuid, value);
+      if (!state.userAvailability) {
+        state.userAvailability = new Map();
+      }
+      state.userAvailability.set(userUuid, value);
 
-  const allAgents = [...state.groups.values()].flat();
-  const relatedAgents = allAgents.filter(a => a.userUuid === userUuid);
-  relatedAgents.forEach(agent => syncAgentDom(agent));
+      // On ne touche qu'aux agents liés à ce userUuid
+      const allAgents = [...state.groups.values()].flat();
+      const relatedAgents = allAgents.filter(a => a.userUuid === userUuid);
+      relatedAgents.forEach(agent => syncAgentDom(agent));
 
-  return;
-}
+      return;
+    }
+
 
 
     // ======================================================
