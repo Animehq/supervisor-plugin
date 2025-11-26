@@ -726,20 +726,30 @@ function getAvailabilityPill(rawAvailability) {
     return { text: 'Indisponible', css: 'pill--offline' };
   }
 
-  let v = String(rawAvailability).toLowerCase();
+  const v = String(rawAvailability).toLowerCase().trim();
 
   // 🟢 Disponible
-  if (v === 'available') {
+  if (v === 'available' || v === 'online') {
     return { text: 'Disponible', css: 'pill--available' };
   }
 
-  // 🟠 Occupé
-  if (v === 'away') {
+  // 📞 En appel / OnCall
+  if (
+    v === 'oncall' ||
+    v === 'on_call' ||
+    v === 'on-the-phone' ||
+    v === 'on_the_phone'
+  ) {
+    return { text: 'En appel', css: 'pill--busy' };
+  }
+
+  // 🟠 Occupé (away / busy)
+  if (v === 'away' || v === 'busy') {
     return { text: 'Occupé', css: 'pill--busy' };
   }
 
-  // 🔴 Indisponible
-  if (v === 'unavailable') {
+  // 🔴 Indisponible / Hors ligne
+  if (v === 'unavailable' || v === 'offline' || v.includes('unavailab')) {
     return { text: 'Indisponible', css: 'pill--unavailable' };
   }
 
@@ -2722,49 +2732,69 @@ if (
       return;
     }
 
-    // ======================================================
-    // X) Présence / disponibilité (chatd_presence_updated)
-    // ======================================================
-    if (
-      evRaw === 'chatd_presence_updated' ||   // nom brut venant du WS
-      ev === 'chatd.presence.updated'        // nom normalisé (avec les points)
-    ) {
-      const p = payload || {};
-      const userUuid =
-        p.user_uuid || p.userUuid || p.uuid || p.id || null;
+// ======================================================
+// X) Présence / disponibilité (chatd_presence_updated)
+// ======================================================
+if (
+  evRaw === 'chatd_presence_updated' ||   // nom brut venant du WS
+  ev === 'chatd.presence.updated'        // nom normalisé (avec les points)
+) {
+  const p = payload || {};
+  const userUuid =
+    p.user_uuid || p.userUuid || p.uuid || p.id || null;
 
-      if (!userUuid) return;
+  if (!userUuid) return;
 
-      // Même logique que buildUserAvailabilityFromPresences mais pour un seul objet
-      let value =
-        p.state ||
-        p.status ||
-        p.availability ||
-        (p.presence &&
-          (p.presence.state ||
-           p.presence.status ||
-           p.presence.availability)) ||
-        null;
+  // On sépare bien "state" (available/away/...) et "status" (oncall, on_the_phone, etc.)
+  const stateField =
+    p.state ||
+    p.availability ||
+    (p.presence &&
+      (p.presence.state || p.presence.availability)) ||
+    null;
 
-      if (!value && typeof p.dnd === 'boolean') {
-        value = p.dnd ? 'dnd' : 'available';
-      }
-      if (!value && typeof p.invisible === 'boolean' && p.invisible) {
-        value = 'invisible';
-      }
+  const statusField =
+    p.status ||
+    (p.presence && p.presence.status) ||
+    null;
 
-      if (!state.userAvailability) {
-        state.userAvailability = new Map();
-      }
-      state.userAvailability.set(userUuid, value);
+  let value = null;
 
-      // On ne touche qu'aux agents liés à ce userUuid
-      const allAgents = [...state.groups.values()].flat();
-      const relatedAgents = allAgents.filter(a => a.userUuid === userUuid);
-      relatedAgents.forEach(agent => syncAgentDom(agent));
+  // 1) Si le status indique explicitement un appel → on force "oncall"
+  if (
+    statusField &&
+    /call|phone/i.test(String(statusField))
+  ) {
+    value = 'oncall';
+  } else if (stateField) {
+    // 2) Sinon on garde la state "classique"
+    value = stateField;
+  } else if (statusField) {
+    // 3) À défaut on tombe sur status brut
+    value = statusField;
+  }
 
-      return;
-    }
+  // 4) Fallbacks DND / invisible si on n'a toujours rien
+  if (!value && typeof p.dnd === 'boolean') {
+    value = p.dnd ? 'dnd' : 'available';
+  }
+  if (!value && typeof p.invisible === 'boolean' && p.invisible) {
+    value = 'invisible';
+  }
+
+  if (!state.userAvailability) {
+    state.userAvailability = new Map();
+  }
+  state.userAvailability.set(userUuid, value);
+
+  // On ne touche qu'aux agents liés à ce userUuid
+  const allAgents = [...state.groups.values()].flat();
+  const relatedAgents = allAgents.filter(a => a.userUuid === userUuid);
+  relatedAgents.forEach(agent => syncAgentDom(agent));
+
+  return;
+}
+
 
 
 
