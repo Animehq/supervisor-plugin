@@ -50,6 +50,9 @@ const state = {
   userAvailability: new Map(), // présence chatd
   userSessions: new Map(),    // connecté / non connecté (auth)
   userDnd: new Map(),         // service DND (confd)
+  usersByUuid: new Map(),
+usersByExt: new Map(),
+directoryByNumber: new Map(),
   websocket: null,
   realtimeReloadScheduled: false,
   // Nouvel état pour les appels
@@ -202,54 +205,52 @@ function createApiClient(baseUrl, token) {
       headers,
     });
 
-      if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    let json = null;
-    try {
-      json = text ? JSON.parse(text) : null;
-    } catch {
-      // pas grave si ce n'est pas du JSON
-    }
-
-    // 🧊 Cas particulier : user inconnu sur /auth/.../sessions
-    const isUnknownUserSessions404 =
-      res.status === 404 &&
-      json &&
-      json.error_id === 'unknown-user' &&
-      path.startsWith('/api/auth/0.1/users/') &&
-      path.endsWith('/sessions');
-
-    if (isUnknownUserSessions404) {
-      console.warn(
-        '[Superviseur] Utilisateur inconnu pour les sessions auth, marqué comme non connecté :',
-        path
-      );
-      // on fait comme s'il n'avait aucune session
-      return { items: [] };
-    }
-
-    console.error('[Superviseur] Erreur API', res.status, url, text);
-
-    // 🔐 Sécurité token expiré côté API REST
-    if (res.status === 401 || res.status === 403) {
-      const lower = (text || '').toLowerCase();
-
-      if (lower.includes('expired') || lower.includes('token')) {
-        setStatus('Session expirée — rechargement…', 'error');
-        setTimeout(() => {
-          window.location.reload();
-        }, 800);
-        return;
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      let json = null;
+      try {
+        json = text ? JSON.parse(text) : null;
+      } catch {
+        // pas grave si ce n'est pas du JSON
       }
 
-      throw new Error(
-        `Accès refusé (${res.status}). Vérifiez les droits Call Center / Agents.`
-      );
+      // 🧊 Cas particulier : user inconnu OU 404 générique sur /auth/.../sessions
+      const isUserSessions404 =
+        res.status === 404 &&
+        path.startsWith('/api/auth/0.1/users/') &&
+        path.endsWith('/sessions');
+
+      if (isUserSessions404) {
+        console.warn(
+          '[Superviseur] Utilisateur inconnu pour les sessions auth, marqué comme non connecté :',
+          path,
+          json || text || '(pas de payload)'
+        );
+        // On fait comme s'il n'avait aucune session
+        return { items: [] };
+      }
+
+      console.error('[Superviseur] Erreur API', res.status, url, text);
+
+      // 🔐 Sécurité token expiré côté API REST
+      if (res.status === 401 || res.status === 403) {
+        const lower = (text || '').toLowerCase();
+
+        if (lower.includes('expired') || lower.includes('token')) {
+          setStatus('Session expirée — rechargement…', 'error');
+          setTimeout(() => {
+            window.location.reload();
+          }, 800);
+          return;
+        }
+
+        throw new Error(
+          `Accès refusé (${res.status}). Vérifiez les droits Call Center / Agents.`
+        );
+      }
+
+      throw new Error(`Erreur API ${res.status}: ${text || res.statusText}`);
     }
-
-    throw new Error(`Erreur API ${res.status}: ${text || res.statusText}`);
-  }
-
 
     if (res.status === 204) return null;
 
@@ -260,6 +261,7 @@ function createApiClient(baseUrl, token) {
     }
   };
 }
+
 
 // Couleur personnalisée par file d'attente à partir de son nom
 function queueColorFromName(name) {
@@ -288,6 +290,8 @@ function buildUsersMaps(usersRaw) {
   const users = normalizeCollection(usersRaw);
   const usersByUuid = new Map();
   const usersByExt = new Map();
+  state.usersByUuid = usersByUuid;
+state.usersByExt = usersByExt;
 
   users.forEach((user) => {
     const displayName =
@@ -636,8 +640,8 @@ async function buildUserSessionsForParking(groups, api) {
   const PARKING_LABEL = 'Hors call center';
   const map = new Map();
 
-  const parkingRows = groups.get(PARKING_LABEL);
-  if (!parkingRows || !parkingRows.length) {
+  const parkingRows = groups.get(PARKING_LABEL) || [];
+  if (!parkingRows.length) {
     return map;
   }
 
@@ -646,11 +650,17 @@ async function buildUserSessionsForParking(groups, api) {
     new Set(
       parkingRows
         .map((row) => row.userUuid)
-        .filter((uuid) => !!uuid)
+        .filter(Boolean)
     )
   );
 
+  if (!uniqueUuids.length) {
+    return map;
+  }
+
   const tasks = uniqueUuids.map(async (uuid) => {
+    let isConnected = false;
+
     try {
       const res = await api(
         `/api/auth/0.1/users/${encodeURIComponent(uuid)}/sessions`,
@@ -658,24 +668,35 @@ async function buildUserSessionsForParking(groups, api) {
       );
 
       let sessions = [];
-      if (res && Array.isArray(res.items)) {
-        sessions = res.items;
-      } else if (res && Array.isArray(res.sessions)) {
-        sessions = res.sessions;
+
+      if (!res) {
+        // null / undefined → pas de session
+        sessions = [];
       } else if (Array.isArray(res)) {
+        // réponse = tableau brut
         sessions = res;
+      } else if (Array.isArray(res.items)) {
+        // format courant { items: [...] }
+        sessions = res.items;
+      } else if (Array.isArray(res.sessions)) {
+        // autre format possible { sessions: [...] }
+        sessions = res.sessions;
+      } else {
+        // format inconnu → on considère aucune session
+        sessions = [];
       }
 
-      const isConnected = sessions.length > 0;
-      map.set(uuid, isConnected);
+      isConnected = sessions.length > 0;
     } catch (e) {
       console.warn(
         '[Superviseur] Impossible de charger les sessions auth pour',
         uuid,
         e
       );
-      map.set(uuid, false);
+      isConnected = false;
     }
+
+    map.set(uuid, isConnected);
   });
 
   await Promise.all(tasks);
@@ -683,6 +704,7 @@ async function buildUserSessionsForParking(groups, api) {
   console.log('[Superviseur] userSessions (auth)', map);
   return map;
 }
+
 
 
 // -------------------------------------------------------------------
@@ -918,6 +940,39 @@ function syncAgentDom(agent) {
     });
   });
 }
+
+function buildCallChipHtml(callInfo) {
+  // Aucun appel en cours
+  if (!callInfo) {
+    return `
+      <div class="call-cell">
+        <div class="call-chip call-chip--none">
+          <span class="call-chip__number">—</span>
+          <span class="call-chip__duration"></span>
+        </div>
+      </div>
+    `;
+  }
+
+  // Avec appel en cours
+  const label = callInfo.number || 'Appel en cours';
+  const dirIcon =
+    callInfo.direction === 'inbound'
+      ? `<span class="call-chip__dir inbound">⬅️</span>`
+      : `<span class="call-chip__dir outbound">➡️</span>`;
+
+  return `
+    <div class="call-cell">
+      <div class="call-chip call-chip--active" data-call-start="${callInfo.startedAt}">
+        ${dirIcon}
+        <span class="call-chip__number">${label}</span>
+        <span class="call-chip__duration">00:00</span>
+      </div>
+    </div>
+  `;
+}
+
+
 
 
 
@@ -1187,6 +1242,41 @@ async function loadUserDnd(api, userUuidSet) {
   return result;
 }
 
+// Rafraîchit le DND pour UN seul utilisateur, puis met à jour l'UI
+async function refreshUserDndForUser(api, userUuid) {
+  if (!userUuid) return;
+
+  try {
+    // On réutilise loadUserDnd mais avec un seul UUID
+    const map = await loadUserDnd(api, new Set([userUuid]));
+    const enabled = map.get(userUuid) === true;
+
+    if (!state.userDnd) {
+      state.userDnd = new Map();
+    }
+    state.userDnd.set(userUuid, enabled);
+
+    // 1) Met à jour tous les boutons NPD (DND) de ce user
+    syncAllDndButtonsForUser(userUuid, enabled);
+
+    // 2) Met à jour les pills / statuts des lignes liées à ce user
+    const allAgents = [...state.groups.values()].flat();
+    const relatedAgents = allAgents.filter(
+      (a) => a.userUuid === userUuid
+    );
+
+    relatedAgents.forEach((agent) => {
+      syncAgentDom(agent);
+    });
+  } catch (e) {
+    console.warn(
+      '[Superviseur] Impossible de rafraîchir le DND via WS pour',
+      userUuid,
+      e
+    );
+  }
+}
+
 
 // Charge les renvois inconditionnels pour une liste de users
 async function loadUserForwards(api, userUuidSet) {
@@ -1273,34 +1363,36 @@ async function buildCallsByUserMap_EUC(callsRaw, api) {
 
     if (!userUuid) continue;
 
-    // --- Numéro distant ---
-    let number = null;
+    // --- Quel numéro afficher ? ---
+let number = null;
 
-    if (data.direction === 'outbound') {
-      // Appel sortant : on privilégie le numéro externe
-      number =
-        data.other_party_number ||
-        data.remote_callee_id_number ||
-        data.callee_id_number ||
-        data.callee_exten ||      // si appel interne
-        data.dialed_extension ||
-        null;
-    } else if (data.direction === 'inbound') {
-      // Appel entrant
-      number =
-        data.other_party_number ||
-        data.remote_caller_id_number ||
-        data.caller_id_number ||
-        data.display_caller_name ||
-        null;
-    } else {
-      // Fallback si direction inconnue
-      number =
-        data.other_party_number ||
-        data.caller_id_number ||
-        data.callee_id_number ||
-        null;
-    }
+if (data.direction === 'outbound') {
+  // Appel sortant : on affiche le numéro appelé
+  number =
+    data.other_party_number ||       // numéro distant
+    data.remote_callee_id_number ||
+    data.callee_id_number ||
+    data.callee_exten ||             // si appel interne
+    data.dialed_extension ||
+    data.caller_id_number ||
+    null;
+} else if (data.direction === 'inbound') {
+  // Appel entrant : on affiche le numéro de l'appelant externe
+  number =
+    data.remote_caller_id_number ||
+    data.caller_id_number ||
+    data.other_party_number ||
+    data.display_caller_name ||
+    null;
+} else {
+  // Fallback si direction inconnue
+  number =
+    data.other_party_number ||
+    data.caller_id_number ||
+    data.callee_id_number ||
+    null;
+}
+const displayNumber = resolveNumberLabel(number || '');
 
     // --- Date de début pour le timer ---
     let startedAtMs = null;
@@ -1319,16 +1411,39 @@ async function buildCallsByUserMap_EUC(callsRaw, api) {
     }
 
     map.set(userUuid, {
-      number,
-      direction: data.direction === 'inbound' ? 'inbound' : 'outbound',
-      startedAt: startedAtMs,
-    });
+  number: displayNumber,         // ce qu’on affiche
+  rawNumber: number,             // numéro brut au cas où
+  direction: data.direction === 'inbound' ? 'inbound' : 'outbound',
+  startedAt: startedAtMs,
+});
   }
 
   console.log('[Superviseur] callsByUser EUC construit', map);
   return map;
 }
 
+function resolveNumberLabel(rawNumber) {
+  if (!rawNumber) return '';
+  const num = String(rawNumber);
+
+  // 1) Annuaire externe (si tu l’alimentes plus tard)
+  if (state.directoryByNumber && state.directoryByNumber.has(num)) {
+    const entry = state.directoryByNumber.get(num);
+    if (entry && entry.name) {
+      return num + ' – ' + entry.name;
+    }
+  }
+
+  // 2) Annuaire interne : extension -> nom utilisateur
+  if (state.usersByExt && state.usersByExt.has(num)) {
+    const user = state.usersByExt.get(num);
+    if (user && user.name) {
+      return num + ' – ' + user.name;
+    }
+  }
+
+  return num;
+}
 
 
 
@@ -1555,11 +1670,11 @@ table.appendChild(thead);
         tr.dataset.agentNumber = agent.number || agent.extension;
       }
 
-      const callsByUser = state.callsByUser || new Map();
+            const callsByUser = state.callsByUser || new Map();
 
       let statusInfo;
 
-      // File "Hors call center" → on utilise sessions + DND + présence
+      // File "Hors call center" → sessions + DND + présence
       if (isParking && agent.userUuid) {
         const sessionsMap = state.userSessions || new Map();
         const dndMap = state.userDnd || new Map();
@@ -1584,76 +1699,49 @@ table.appendChild(thead);
         statusInfo = getStatusInfo(agent);
       }
 
-      let callCellHtml = '';
+      // 💬 Appel en cours (map userUuid -> callInfo)
       const callInfo =
         agent.userUuid && callsByUser.has(agent.userUuid)
           ? callsByUser.get(agent.userUuid)
           : null;
 
+      const callCellHtml = buildCallChipHtml(callInfo);
 
-if (!callInfo) {
-  // Aucun appel en cours pour cet agent
-  callCellHtml = `
-    <div class="call-chip call-chip--none">
-      <span class="call-chip__number">—</span>
-      <span class="call-chip__duration"></span>
-    </div>
-  `;
-} else {
-  // Appel en cours : on affiche direction + numéro + durée
-  const label = callInfo.number || 'Appel en cours';
-  const dirIcon =
-    callInfo.direction === 'inbound'
-      ? '<span class="call-chip__dir inbound">⬅️</span>'
-      : '<span class="call-chip__dir outbound">➡️</span>';
+      let supervisionCell = null;
+      let transferCell = null;
+      let actionsCell = null;
 
-  callCellHtml = `
-    <div class="call-chip call-chip--active" data-call-start="${callInfo.startedAt}">
-      ${dirIcon}
-      <span class="call-chip__number">${label}</span>
-      <span class="call-chip__duration">00:00</span>
-    </div>
-  `;
-}
+      if (isParking) {
+        // Hors call center : Nom / Extension / Disponibilité / Transfert / DND
+        tr.innerHTML = `
+          <td>${agent.name}</td>
+          <td>${agent.extension || '—'}</td>
+          <td class="col-status">
+            <span class="pill ${statusInfo.css}">${statusInfo.text}</span>
+          </td>
+          <td class="col-transfer"></td>
+          <td class="col-dnd"></td>
+        `;
+        transferCell = tr.querySelector('.col-transfer');
+      } else {
+        // Files ACD complètes
+        tr.innerHTML = `
+          <td>${agent.name}</td>
+          <td>${agent.extension || '—'}</td>
+          <td class="col-status">
+            <span class="pill ${statusInfo.css}">${statusInfo.text}</span>
+          </td>
+          <td class="col-call">${callCellHtml}</td>
+          <td class="col-supervision"></td>
+          <td class="col-transfer"></td>
+          <td class="col-dnd"></td>
+          <td class="col-actions"></td>
+        `;
 
-
-let supervisionCell = null;
-let transferCell = null;
-let actionsCell = null;
-
-const dndInfo = getDndPill(agent.userUuid || agent.user_uuid);
-
-if (isParking) {
-  // Hors call center : Nom / Extension / Disponibilité / Transfert / DND
-  tr.innerHTML = `
-    <td>${agent.name}</td>
-    <td>${agent.extension || '—'}</td>
-    <td class="col-status">
-      <span class="pill ${statusInfo.css}">${statusInfo.text}</span>
-    </td>
-    <td class="col-transfer"></td>
-    <td class="col-dnd"></td>
-  `;
-  transferCell = tr.querySelector('.col-transfer');
-} else {
-  // Files ACD complètes
-  tr.innerHTML = `
-    <td>${agent.name}</td>
-    <td>${agent.extension || '—'}</td>
-    <td class="col-status">
-      <span class="pill ${statusInfo.css}">${statusInfo.text}</span>
-    </td>
-    <td class="col-callinfo">${callCellHtml}</td>
-    <td class="col-supervision"></td>
-    <td class="col-transfer"></td>
-    <td class="col-dnd"></td>
-    <td class="col-actions"></td>
-  `;
-
-  supervisionCell = tr.querySelector('.col-supervision');
-  transferCell = tr.querySelector('.col-transfer');
-  actionsCell = tr.querySelector('.col-actions');
-}
+        supervisionCell = tr.querySelector('.col-supervision');
+        transferCell = tr.querySelector('.col-transfer');
+        actionsCell = tr.querySelector('.col-actions');
+      }
 
 
 
@@ -2118,6 +2206,50 @@ if (parkingName) {
   startCallDurationTicker();
 }
 
+async function refreshCallsFromApi(api) {
+  try {
+    const callsRaw = await api('/api/calld/1.0/calls');
+    const oldMap = state.callsByUser || new Map();
+    const newMap = await buildCallsByUserMap_EUC(callsRaw, api);
+    state.callsByUser = newMap;
+
+    const affected = new Set();
+    for (const k of oldMap.keys()) affected.add(k);
+    for (const k of newMap.keys()) affected.add(k);
+
+    affected.forEach((userUuid) => {
+      refreshCallCellForUser(userUuid);  // ✅ seulement les lignes impactées
+    });
+
+    startCallDurationTicker();
+  } catch (err) {
+    console.error('[Superviseur] Erreur refresh calls depuis WS :', err);
+  }
+}
+
+
+// Met à jour UNIQUEMENT la/les lignes d’un user pour la colonne "APPEL EN COURS"
+function refreshCallCellForUser(userUuid) {
+  if (!userUuid || !containerEl || !state.callsByUser) return;
+
+  const callInfo = state.callsByUser.get(userUuid) || null;
+
+  // Toutes les lignes de cet user
+  const rows = containerEl.querySelectorAll(
+    `tr[data-user-uuid="${userUuid}"]`
+  );
+  if (!rows.length) return;
+
+  const html = buildCallChipHtml(callInfo);
+
+  rows.forEach((row) => {
+    // ⚠️ On cible bien la bonne colonne !
+    const td = row.querySelector('.col-call');
+    if (td) {
+      td.innerHTML = html;
+    }
+  });
+}
 
 
 
@@ -2323,18 +2455,24 @@ renderQueues(groups, api, queuesMeta);
 // WebSocket temps réel
 // -------------------------------------------------------------------
 
+// -------------------------------------------------------------------
+// Fallback WebSocket : neutralisé en mode ZERO POLLING
+// -------------------------------------------------------------------
 function scheduleRealtimeReload(api) {
-  if (state.realtimeReloadScheduled) return;
-  state.realtimeReloadScheduled = true;
+  // En mode ultra-optimisé, on ne fait plus de reload global auto.
+  // On garde juste un log pour debug.
+  console.debug('[Superviseur] scheduleRealtimeReload ignoré (mode ZERO POLLING)');
+}
 
-  setTimeout(async () => {
-    state.realtimeReloadScheduled = false;
-    try {
-      await loadData(api, { silent: true });
-    } catch (e) {
-      console.error('[Superviseur] Erreur reload temps réel', e);
-    }
-  }, 1500);
+
+function normalizeEventName(raw) {
+  if (!raw) return '';
+  return String(raw)
+    .toLowerCase()
+    .trim()
+    .replace(/\s+/g, '')     // espaces → rien
+    .replace(/-/g, '.')      // tirets → points
+    .replace(/_/g, '.');     // underscore → points
 }
 
 function connectRealtime(baseUrl, token, api) {
@@ -2346,7 +2484,6 @@ function connectRealtime(baseUrl, token, api) {
   console.log('[Superviseur] Connexion WebSocket', wsUrl);
 
   let ws;
-
   try {
     ws = new WebSocket(wsUrl);
   } catch (err) {
@@ -2356,20 +2493,11 @@ function connectRealtime(baseUrl, token, api) {
 
   ws.onopen = () => {
     console.log('[Superviseur] WebSocket ouvert');
-
     try {
-      // 1️⃣ Abonnement à tous les events
-      ws.send(
-        JSON.stringify({
-          op: 'subscribe',
-          data: { event_name: '*' },
-        }),
-      );
-
-      // 2️⃣ Démarrage du flux
+      ws.send(JSON.stringify({ op: 'subscribe', data: { event_name: '*' } }));
       ws.send(JSON.stringify({ op: 'start' }));
     } catch (e) {
-      console.error('[Superviseur] Erreur envoi subscribe/start WS', e);
+      console.error('[Superviseur] Erreur subscribe/start WS', e);
     }
   };
 
@@ -2377,170 +2505,184 @@ function connectRealtime(baseUrl, token, api) {
     let data;
     try {
       data = JSON.parse(event.data);
-    } catch (e) {
+    } catch {
       return;
     }
 
-    // Messages de contrôle (init / subscribe / start avec "code")
+    // Messages de contrôle
     if (data.op && typeof data.code === 'number') {
       console.log('[Superviseur] WS control :', data);
       return;
     }
 
-    const ev = data.event_type || data.name || data.type || data.op;
+    const evRaw =
+      data.event_name ||
+      data.event_type ||
+      data.name ||
+      data.type ||
+      data.op;
+
+    const ev = normalizeEventName(evRaw); // ex: "call_ended" → "call.ended"
     const payload = data.data || data;
 
-    console.log('[Superviseur] WS event :', ev, payload);
+    console.log('[Superviseur] WS event', evRaw, payload);
 
-    // --- EVENTS STATUT UTILISATEUR ---
-    // Pour l'instant on n'en fait rien pour éviter les reloads automatiques
-if (ev === 'user.status.update') {
-  console.log('[Superviseur] WS user.status.update (ignoré, pas de reload auto)');
-  return;
-}
+    // ======================================================
+    // 1) DND / Services utilisateur
+    // ======================================================
+    if (ev.includes('dnd') || ev === 'user.services.updated') {
+      const p = payload || {};
+      const userUuid =
+        p.user_uuid ||
+        p.userUuid ||
+        p.uuid ||
+        (p.user && (p.user.uuid || p.user.user_uuid)) ||
+        null;
 
-      // --- EVENTS AGENTS (login/logout) ---
-if (
-  ev === 'agent.logged_in' ||
-  ev === 'agent.logged_out' ||
-  ev === 'agent_logged_in' ||
-  ev === 'agent_logged_out'
-) {
-  const p = payload || {};
+      if (!userUuid) return;
 
-  const agentId =
-    p.agent_id ??
-    p.agent?.id ??
-    p.agent?.agent_id;
-
-  const isLogged =
-    ev === 'agent.logged_in' || ev === 'agent_logged_in';
-
-  if (agentId != null) {
-    const agent = findAgentInStateById(agentId);
-
-    if (agent) {
-      agent.logged = isLogged;
-
-      if (!agent.logged) {
-        // on nettoie la pause si l’agent est déloggé
-        agent.paused = false;
-      }
-
-      // Mise à jour de toutes les lignes de cet agent
-      syncAgentDom(agent);
-      return; // ✅ pas de loadData complet, pas d'updateHeaderStats ici
-    }
-  }
-
-  // si vraiment on ne trouve pas l’agent -> reload de secours
-  scheduleRealtimeReload(api);
-  return;
-}
-
-
-  // --- EVENT AGENT STATUS UPDATE (backend envoie logged_in / logged_out) ---
-if (ev === 'agent_status_update' || ev === 'agent.status.update') {
-  const p = payload || {};
-  const agentId = p.agent_id ?? p.agent?.id ?? p.agent?.agent_id;
-  const status = p.status;
-
-  if (agentId != null) {
-    const agent = findAgentInStateById(agentId);
-
-    if (agent) {
-      if (status === 'logged_out') {
-        agent.logged = false;
-        agent.paused = false;
-      } else if (status === 'logged_in') {
-        agent.logged = true;
-      }
-
-      syncAgentDom(agent);
-      return; // ✅ pas de updateHeaderStats ici non plus
-    }
-  }
-
-  scheduleRealtimeReload(api);
-  return;
-}
-
-
-
-    if (
-  ev === 'queue.member.paused' ||
-  ev === 'queue.member.unpaused' ||
-  ev === 'agent_paused' ||
-  ev === 'agent_unpaused'
-) {
-  // On essaye de ne mettre à jour QUE l'agent concerné
-  const p = payload || {};
-  const agentId =
-    p.agent_id ??
-    p.member?.agent_id ??
-    p.queue_member?.agent_id ??
-    p.agent?.id ??
-    p.agent?.agent_id;
-
-  const shouldBePaused =
-    ev === 'queue.member.paused' || ev === 'agent_paused';
-
-  if (agentId != null) {
-    const agent = findAgentInStateById(agentId);
-
-    if (agent) {
-      agent.paused = shouldBePaused;
-      syncAgentDom(agent); // ✅ on met à jour uniquement la/les lignes de cet agent
+      await refreshUserDndForUser(api, userUuid);
       return;
     }
-  }
 
-  // Fallback si vraiment on ne trouve pas l'agent
-  scheduleRealtimeReload(api);
-  return;
-}
+    // ======================================================
+    // 2) AGENT : login/logout
+    // (agent.logged_in / agent.logged_out → normalisé en agent.logged.in / agent.logged.out)
+    // ======================================================
+    if (ev === 'agent.logged.in' || ev === 'agent.logged.out') {
+      const p = payload || {};
+      const agentId = p.agent_id ?? p.agent?.id ?? p.agent?.agent_id;
+      const isLogged = ev === 'agent.logged.in';
 
+      if (!agentId) return;
 
-    // --- EVENTS APPELS ---
+      const agent = findAgentInStateById(agentId);
+      if (agent) {
+        agent.logged = isLogged;
+        if (!isLogged) {
+          agent.paused = false; // délogué → plus en pause
+        }
+        syncAgentDom(agent);
+        return;
+      }
+
+      // Si on ne trouve pas l'agent en mémoire, petit reload ciblé
+      scheduleRealtimeReload(api);
+      return;
+    }
+
+    // ======================================================
+    // 3) AGENT STATUS UPDATE
+    // ======================================================
+    if (ev === 'agent.status.update') {
+      const p = payload || {};
+      const agentId = p.agent_id ?? p.agent?.id ?? p.agent?.agent_id;
+      const status = (p.status || '').toLowerCase();
+
+      if (!agentId) return;
+
+      const agent = findAgentInStateById(agentId);
+      if (agent) {
+        if (status === 'logged_out') {
+          agent.logged = false;
+          agent.paused = false;
+        } else if (status === 'logged_in') {
+          agent.logged = true;
+        }
+        syncAgentDom(agent);
+        return;
+      }
+
+      scheduleRealtimeReload(api);
+      return;
+    }
+
+    // ======================================================
+    // 4) AGENT PAUSE / UNPAUSE
+    // ======================================================
+    if (ev === 'queue.member.paused' || ev === 'agent.paused') {
+      const p = payload || {};
+      const agentId =
+        p.agent_id ??
+        p.member?.agent_id ??
+        p.queue_member?.agent_id ??
+        p.agent?.id ??
+        p.agent?.agent_id;
+
+      if (!agentId) return;
+
+      const agent = findAgentInStateById(agentId);
+      if (agent) {
+        agent.paused = true;
+        syncAgentDom(agent);
+        return;
+      }
+
+      scheduleRealtimeReload(api);
+      return;
+    }
+
+    if (ev === 'queue.member.unpaused' || ev === 'agent.unpaused') {
+      const p = payload || {};
+      const agentId =
+        p.agent_id ??
+        p.member?.agent_id ??
+        p.queue_member?.agent_id ??
+        p.agent?.id ??
+        p.agent?.agent_id;
+
+      if (!agentId) return;
+
+      const agent = findAgentInStateById(agentId);
+      if (agent) {
+        agent.paused = false;
+        syncAgentDom(agent);
+        return;
+      }
+
+      scheduleRealtimeReload(api);
+      return;
+    }
+
+    // ======================================================
+    // 5) ÉVÉNEMENTS APPELS (créé / mis à jour / répondu / raccroché / log)
+    //    → PAS de reload global : juste /calld/1.0/calls + update des cellules concernées
+    // ======================================================
     if (
       ev === 'call.created' ||
       ev === 'call.updated' ||
       ev === 'call.answered' ||
-      ev === 'call.hangup'
+      ev === 'call.ended' ||
+      ev === 'call.hangup' ||
+      ev === 'call.log.created' ||
+      ev === 'call.log.user.created'
     ) {
-      const callsRaw = await api('/api/calld/1.0/calls');
-      state.callsByUser = await buildCallsByUserMap_EUC(callsRaw, api);
-      renderQueues(state.groups, api, state.queuesMeta);
-      startCallDurationTicker();
+      // Ici, refreshCallsFromApi(api) :
+      //  - fait un GET /api/calld/1.0/calls
+      //  - reconstruit callsByUser (Map)
+      //  - compare avec l'ancien Map
+      //  - met à jour UNIQUEMENT les cellules des users impactés
+      await refreshCallsFromApi(api);
       return;
     }
 
-    // Fallback : on ignore les autres événements pour éviter les reloads trop fréquents
-console.log('[Superviseur] WS event ignoré (pas de reload auto) :', ev, payload);
-return;
+    // ======================================================
+    // 6) Tout le reste est ignoré (pas de reload auto)
+    // ======================================================
+    console.log('[Superviseur] WS ignoré', evRaw);
   };
 
   ws.onclose = (ev) => {
     console.warn('[Superviseur] WebSocket fermé', ev.code, ev.reason);
 
-    // 4003 = token expiré
+    // Token expiré
     if (ev.code === 4003) {
-      console.error(
-        '[Superviseur] Token expiré → rechargement de la page...',
-      );
       setStatus('Session expirée — rechargement…', 'error');
       setTimeout(() => window.location.reload(), 800);
       return;
     }
 
-    // 4004 = erreur de protocole
-    if (ev.code === 4004) {
-      console.error(
-        '[Superviseur] Erreur de protocole WebSocket (4004) – vérifier les messages envoyés',
-      );
-    }
-
-    // Reconnexion automatique (déco réseau, reboot stack, etc.)
+    // Reconnexion auto
     setTimeout(() => {
       if (state.api) {
         state.websocket = connectRealtime(baseUrl, token, api);
@@ -2555,10 +2697,11 @@ return;
   return ws;
 }
 
-// -------------------------------------------------------------------
-// Auto-refresh optimisé (cohabite bien avec WebSocket)
-// -------------------------------------------------------------------
 
+
+// -------------------------------------------------------------------
+// Auto-refresh ultra-optimisé : ZERO POLLING
+// -------------------------------------------------------------------
 function startAutoRefresh(api) {
   // 🔁 Bouton refresh manuel uniquement
   if (refreshBtn && !refreshBtn.dataset.bound) {
@@ -2569,6 +2712,7 @@ function startAutoRefresh(api) {
         refreshBtn.classList.add('spin');
         setStatus('Rafraîchissement…', 'info');
 
+        // 🔄 reload global, mais UNIQUEMENT sur clic
         await loadData(state.api, { silent: true });
 
         setStatus('Données mises à jour.', 'success');
@@ -2587,8 +2731,9 @@ function startAutoRefresh(api) {
     autoRefreshTimer = null;
   }
 
-  // Et SURTOUT : pas de setInterval ici 👇
+  // ❌ et SURTOUT : PAS de setInterval ici
 }
+
 
 
 
