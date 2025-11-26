@@ -1277,6 +1277,43 @@ async function refreshUserDndForUser(api, userUuid) {
   }
 }
 
+// Rafraîchit le renvoi inconditionnel pour UN user, puis met à jour l'UI
+async function refreshUserForwardForUser(api, userUuid) {
+  if (!userUuid) return;
+
+  try {
+    // On réutilise loadUserForwards mais avec un seul UUID
+    const forwardsMap = await loadUserForwards(api, new Set([userUuid]));
+    const info = forwardsMap.get(userUuid) || { enabled: false, destination: '' };
+
+    if (!state.userForwards) {
+      state.userForwards = new Map();
+    }
+    state.userForwards.set(userUuid, {
+      enabled: !!info.enabled,
+      destination: info.destination || '',
+    });
+
+    // 1) Met à jour tous les champs/boutons de transfert pour ce user
+    syncAllForwardControlsForUser(
+      userUuid,
+      !!info.enabled,
+      info.destination || ''
+    );
+
+    // 2) (optionnel) on refresh les lignes liées si ton statut dépend du forward
+    const allAgents = [...state.groups.values()].flat();
+    const relatedAgents = allAgents.filter(a => a.userUuid === userUuid);
+    relatedAgents.forEach(agent => syncAgentDom(agent));
+  } catch (e) {
+    console.warn(
+      '[Superviseur] Impossible de rafraîchir le renvoi via WS pour',
+      userUuid,
+      e
+    );
+  }
+}
+
 
 // Charge les renvois inconditionnels pour une liste de users
 async function loadUserForwards(api, userUuidSet) {
@@ -2527,23 +2564,35 @@ function connectRealtime(baseUrl, token, api) {
 
     console.log('[Superviseur] WS event', evRaw, payload);
 
-    // ======================================================
-    // 1) DND / Services utilisateur
-    // ======================================================
-    if (ev.includes('dnd') || ev === 'user.services.updated') {
-      const p = payload || {};
-      const userUuid =
-        p.user_uuid ||
-        p.userUuid ||
-        p.uuid ||
-        (p.user && (p.user.uuid || p.user.user_uuid)) ||
-        null;
+   // ======================================================
+// 1) DND / Services utilisateur / Forward
+// ======================================================
+if (
+  ev.includes('dnd') ||
+  ev === 'user.services.updated' ||
+  ev.includes('forward')
+) {
+  const p = payload || {};
+  const userUuid =
+    p.user_uuid || p.userUuid || p.uuid ||
+    (p.user && (p.user.uuid || p.user.user_uuid)) ||
+    null;
 
-      if (!userUuid) return;
+  if (!userUuid) return;
 
-      await refreshUserDndForUser(api, userUuid);
-      return;
-    }
+  // Si l’event parle explicitement de DND → on ne touche que DND
+  if (ev.includes('dnd')) {
+    await refreshUserDndForUser(api, userUuid);
+  } else {
+    // Event générique de services → on rafraîchit DND + Forward
+    await Promise.all([
+      refreshUserDndForUser(api, userUuid),
+      refreshUserForwardForUser(api, userUuid),
+    ]);
+  }
+  return;
+}
+
 
     // ======================================================
     // 2) AGENT : login/logout
@@ -2665,6 +2714,47 @@ function connectRealtime(baseUrl, token, api) {
       await refreshCallsFromApi(api);
       return;
     }
+
+    // ======================================================
+// X) Présence / disponibilité (chatd_presence_updated)
+// ======================================================
+if (ev === 'chatd_presence_updated') {
+  const p = payload || {};
+  const userUuid =
+    p.user_uuid || p.userUuid || p.uuid || p.id || null;
+
+  if (!userUuid) return;
+
+  // Même logique que buildUserAvailabilityFromPresences mais pour un seul objet
+  let value =
+    p.state ||
+    p.status ||
+    p.availability ||
+    (p.presence &&
+      (p.presence.state ||
+       p.presence.status ||
+       p.presence.availability)) ||
+    null;
+
+  if (!value && typeof p.dnd === 'boolean') {
+    value = p.dnd ? 'dnd' : 'available';
+  }
+  if (!value && typeof p.invisible === 'boolean' && p.invisible) {
+    value = 'invisible';
+  }
+
+  if (!state.userAvailability) {
+    state.userAvailability = new Map();
+  }
+  state.userAvailability.set(userUuid, value);
+
+  const allAgents = [...state.groups.values()].flat();
+  const relatedAgents = allAgents.filter(a => a.userUuid === userUuid);
+  relatedAgents.forEach(agent => syncAgentDom(agent));
+
+  return;
+}
+
 
     // ======================================================
     // 6) Tout le reste est ignoré (pas de reload auto)
