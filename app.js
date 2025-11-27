@@ -33,6 +33,8 @@ const containerEl = document.getElementById('queues-container');
 const compactToggleEl = document.getElementById('compact-toggle');
 const themeToggleEl = document.getElementById('theme-toggle');
 const refreshBtn = document.getElementById('refresh-btn');
+// UUID de la source phonebook "Annuaire Adexgroup"
+const PHONEBOOK_SOURCE_UUID = 'f59bc8a4-e518-4e79-9ddb-956565a9aaa0';
 
 // Auto-refresh (optimisé) : toutes les 15s
 const AUTO_REFRESH_INTERVAL_MS = 15000;
@@ -55,6 +57,7 @@ usersByExt: new Map(),
 directoryByNumber: new Map(),
   directoryCache: new Map(),    // num normalisé -> nom (lookup dird)
   dirdProfile: null,            // profil dird à utiliser (ex: "default")
+    phonebookIndex: null,
   websocket: null,
   realtimeReloadScheduled: false,
   // Nouvel état pour les appels
@@ -1521,6 +1524,85 @@ async function buildCallsByUserMap_EUC(callsRaw, api) {
   return map;
 }
 
+async function ensurePhonebookIndex() {
+  // Si on a déjà chargé l'annuaire
+  if (state.phonebookIndex instanceof Map && state.phonebookIndex.size > 0) {
+    return state.phonebookIndex;
+  }
+
+  if (!state.api) return null;
+
+  console.log('[Superviseur] Chargement du phonebook Annuaire Adexgroup…');
+
+  const index = new Map(); // normalizedNumber -> name
+
+  try {
+    const res = await state.api(
+      `/api/dird/0.1/backends/phonebook/sources/${encodeURIComponent(
+        PHONEBOOK_SOURCE_UUID
+      )}/contacts`,
+      { method: 'GET' }
+    );
+
+    const items = (res && (res.items || res.contacts || res.rows)) || [];
+    console.log('[Superviseur] Phonebook chargé, nb de contacts =', items.length);
+
+    for (const contact of items) {
+      const names = [];
+
+      if (contact.display_name) names.push(contact.display_name);
+      if (contact.name) names.push(contact.name);
+
+      const full =
+        `${contact.firstname || ''} ${contact.lastname || ''}`.trim();
+      if (full) names.push(full);
+
+      const name = names.find(Boolean);
+      if (!name) continue;
+
+      const numbers = new Set();
+
+      // Champs possibles
+      if (contact.phone) numbers.add(contact.phone);
+      if (contact.mobile_phone) numbers.add(contact.mobile_phone);
+      if (contact.office_phone) numbers.add(contact.office_phone);
+      if (contact.home_phone) numbers.add(contact.home_phone);
+      if (contact.number) numbers.add(contact.number);
+
+      // Listes
+      if (Array.isArray(contact.numbers)) {
+        for (const n of contact.numbers) {
+          if (!n) continue;
+          if (typeof n === 'string') {
+            numbers.add(n);
+          } else if (n.value || n.number || n.phone) {
+            numbers.add(n.value || n.number || n.phone);
+          }
+        }
+      }
+
+      for (const raw of numbers) {
+        const norm = normalizePhone(raw);
+        if (!norm) continue;
+
+        // On garde le premier rencontré
+        if (!index.has(norm)) {
+          index.set(norm, name);
+        }
+      }
+    }
+
+    console.log('[Superviseur] Index phonebook construit, entrées =', index.size);
+    state.phonebookIndex = index;
+    return index;
+  } catch (e) {
+    console.warn('[Superviseur] Impossible de charger le phonebook', e);
+    state.phonebookIndex = null;
+    return null;
+  }
+}
+
+
 function normalizePhone(num) {
   if (!num) return '';
   let s = String(num).trim();
@@ -1541,17 +1623,18 @@ function normalizePhone(num) {
   return s;
 }
 
-
+// Utilisé pour construire le label dans callsByUser
 function resolveNumberLabel(rawNumber) {
   if (!rawNumber) return '';
   const raw = String(rawNumber);
   const num = normalizePhone(raw);
 
-  // 1) Cache d'annuaire dird (lookup à la volée)
-  if (state.directoryCache && state.directoryCache.has(num)) {
-    const name = state.directoryCache.get(num);
+  // 1) Phonebook Annuaire Adexgroup (index déjà chargé ?)
+  if (state.phonebookIndex && state.phonebookIndex.has(num)) {
+    const name = state.phonebookIndex.get(num);
     if (name) {
-      return raw + ' – ' + name;
+      // 👉 On affiche **uniquement le nom**
+      return name;
     }
   }
 
@@ -1559,13 +1642,14 @@ function resolveNumberLabel(rawNumber) {
   if (state.usersByExt && state.usersByExt.has(num)) {
     const user = state.usersByExt.get(num);
     if (user && user.name) {
-      return raw + ' – ' + user.name;
+      return user.name;
     }
   }
 
-  // Sinon, on affiche juste le numéro
+  // 3) Fallback : uniquement le numéro
   return raw;
 }
+
 
 
 
@@ -1576,110 +1660,123 @@ async function loadAllDirectoriesEntries(api) {
   return new Map();
 }
 
-
-async function ensureDirdProfile() {
-  // Profil déjà déterminé
-  if (state.dirdProfile !== null) {
-    return state.dirdProfile; // peut être null si on n'a rien trouvé
-  }
-
+// Charge tous les contacts de tous les phonebooks exposés dans le profil "default"
+async function ensureAllPhonebookContacts() {
   if (!state.api) return null;
 
+  // Cache déjà rempli ?
+  if (state.directoryContacts && Array.isArray(state.directoryContacts)) {
+    return state.directoryContacts;
+  }
+
+  let sourcesRes;
   try {
-    const res = await state.api('/api/dird/0.1/profiles?recurse=true', {
-      method: 'GET',
-    });
-
-    const items = (res && res.items) || [];
-    if (!items.length) {
-      console.warn('[Superviseur] Aucun profil dird disponible');
-      state.dirdProfile = null;
-      return null;
-    }
-
-    // On privilégie "default" si présent, sinon le premier
-    const defaultProfile = items.find((p) => p.name === 'default');
-    const chosen = defaultProfile || items[0];
-
-    state.dirdProfile = chosen && chosen.name ? chosen.name : null;
-    console.log('[Superviseur] Profil dird sélectionné :', state.dirdProfile);
-
-    return state.dirdProfile;
+    sourcesRes = await state.api(
+      '/api/dird/0.1/directories/default/sources',
+      { method: 'GET' }
+    );
   } catch (e) {
-    console.warn('[Superviseur] Impossible de charger les profils dird', e);
-    state.dirdProfile = null;
+    console.warn('[Superviseur] Impossible de lister les sources d\'annuaire', e);
     return null;
   }
+
+  const sources = (sourcesRes && sourcesRes.items) || [];
+  // On garde tous les backends "phonebook" (Annuaire Adexgroup & co)
+  const phonebookSources = sources.filter(s => s.backend === 'phonebook');
+
+  if (!phonebookSources.length) {
+    console.warn('[Superviseur] Aucun phonebook trouvé dans le profil default');
+    return null;
+  }
+
+  const allContacts = [];
+
+  for (const src of phonebookSources) {
+    try {
+      const res = await state.api(
+        `/api/dird/0.1/backends/phonebook/sources/${encodeURIComponent(src.uuid)}/contacts`,
+        { method: 'GET' }
+      );
+
+      const items = (res && res.items) || [];
+      // On garde la source dans le contact (au cas où)
+      items.forEach(c => {
+        allContacts.push({ ...c, __source_uuid: src.uuid });
+      });
+    } catch (e) {
+      console.warn('[Superviseur] Erreur chargement phonebook', src.uuid, e);
+    }
+  }
+
+  console.log('[Superviseur] Contacts annuaires chargés :', allContacts.length);
+  state.directoryContacts = allContacts;
+  return allContacts;
 }
 
+
+
+async function ensureDirdProfiles() {
+  if (!state.api) return [];
+
+  if (Array.isArray(state.dirdProfiles) && state.dirdProfiles.length) {
+    return state.dirdProfiles;
+  }
+
+  let res;
+  try {
+    res = await state.api('/api/dird/0.1/profiles?recurse=true', { method: 'GET' });
+  } catch (e) {
+    console.warn('[Superviseur] Impossible de charger les profils dird :', e);
+    // On tente quand même "default"
+    state.dirdProfiles = ['default'];
+    return state.dirdProfiles;
+  }
+
+  const items = (res && res.items) || [];
+  let profiles = items
+    .map(p => p.name || p.uuid || p.id)
+    .filter(Boolean);
+
+  if (!profiles.length) {
+    profiles = ['default'];
+  } else if (!profiles.includes('default')) {
+    profiles.push('default');
+  }
+
+  state.dirdProfiles = profiles;
+  console.log('[Superviseur] Profils dird sélectionnés :', profiles);
+  return profiles;
+}
+
+
+
+
 async function enrichCallCellWithDirectory(td, rawNumber) {
-  if (!rawNumber || !state.api) return;
+  if (!rawNumber || !state.api || !td) return;
 
   const raw = String(rawNumber);
   const norm = normalizePhone(raw);
   if (!norm) return;
 
-  // Initialise le cache si besoin
-  if (!state.directoryCache) {
-    state.directoryCache = new Map();
-  }
-
-  // Déjà en cache ?
-  if (state.directoryCache.has(norm)) {
-    const cached = state.directoryCache.get(norm);
-    if (!cached) return; // on a déjà tenté → pas trouvé
-
-    const span = td.querySelector('.call-chip__number');
-    if (span) {
-      span.textContent = `${raw} – ${cached}`;
-    }
-    return;
-  }
-
-  const profile = await ensureDirdProfile();
-  if (!profile) return;
-
-  let res;
-  try {
-    res = await state.api(
-      `/api/dird/0.1/directories/lookup/${encodeURIComponent(
-        profile
-      )}?term=${encodeURIComponent(norm)}`,
-      { method: 'GET' }
-    );
-  } catch (e) {
-    console.warn('[Superviseur] Lookup dird échoué pour', norm, e);
-    return;
-  }
-
-  const items = (res && res.items) || [];
-  if (!items.length) {
-    // On mémorise "rien trouvé" pour éviter de spammer l'API
-    state.directoryCache.set(norm, null);
-    return;
-  }
-
-  const contact = items[0];
-
-  const name =
-    contact.name ||
-    contact.display_name ||
-    `${contact.firstname || ''} ${contact.lastname || ''}`.trim();
-
-  if (!name) {
-    state.directoryCache.set(norm, null);
-    return;
-  }
-
-  // On met à jour le cache
-  state.directoryCache.set(norm, name);
-
-  // Et on met à jour la pastille si elle est encore là
   const span = td.querySelector('.call-chip__number');
-  if (span) {
-    span.textContent = `${raw} – ${name}`;
+  if (!span) return;
+
+  const index = await ensurePhonebookIndex();
+  if (!index) return;
+
+  const name = index.get(norm);
+  if (!name) {
+    console.log('[Superviseur] Aucun contact phonebook pour', norm);
+    return;
   }
+
+  // 👉 Si on trouve un contact : on affiche **uniquement le nom complet**
+  span.textContent = name;
 }
+
+
+
+
 
 
 
@@ -2488,14 +2585,14 @@ function refreshCallCellForUser(userUuid) {
 
   rows.forEach((row) => {
     // 1) Met à jour la colonne "APPEL EN COURS"
-    const td = row.querySelector('.col-call');   // 👉 il manquait CETTE LIGNE
+    const td = row.querySelector('.col-call');
     if (td) {
       td.innerHTML = html;
 
       // 🔍 Enrichir le label avec l'annuaire dird (Annuaire Adexgroup, etc.)
       if (callInfo && callInfo.rawNumber && typeof enrichCallCellWithDirectory === 'function') {
-        // Appel asynchrone, on ne bloque pas le rendu
-        enrichCallCellWithDirectory(td, callInfo.rawNumber);
+        // On passe AUSSI le userUuid pour pouvoir utiliser la route /{profile}/{user_uuid}
+        enrichCallCellWithDirectory(td, callInfo.rawNumber, userUuid);
       }
     }
 
