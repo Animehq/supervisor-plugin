@@ -16,7 +16,7 @@ import { App } from 'https://cdn.jsdelivr.net/npm/@wazo/euc-plugins-sdk@latest/l
 // Exemple : *301<ext> = join, *302<ext> = spy, *303<ext> = whisper
 const SUPERVISION_PREFIXES = {
   join: '*301',
-  spy: '*302',
+  spy: '*34',
   whisper: '*303',
 };
 
@@ -994,6 +994,78 @@ function buildCallChipHtml(callInfo) {
 
 
 
+// === Actions "superviseur" par agent ==================================
+
+function callAgentFromSupervisor(agent, api) {
+  const ext = agent.extension || agent.number;
+  if (!ext) {
+    alert(
+      `Impossible de déterminer le numéro pour ${agent.name} (id=${agent.id}).`
+    );
+    return;
+  }
+
+  setStatus(`Appel de ${agent.name} (${ext})…`, 'info');
+
+  api('/api/calld/1.0/users/me/calls', {
+    method: 'POST',
+    body: { extension: String(ext) },
+  })
+    .then(() => {
+      setStatus('Appel lancé.', 'success');
+    })
+    .catch((err) => {
+      console.error('[Superviseur] Erreur callAgentFromSupervisor', err);
+      alert(
+        `Erreur lors de l’appel de cet agent.\n` + (err.message || '')
+      );
+      setStatus('Erreur lors de l’appel.', 'error');
+    });
+}
+
+function showAgentHistory(agent) {
+  // TODO : ouvrir un panneau avec l’historique call-logd filtré sur cet agent
+  console.log('[Superviseur] Historique agent', agent);
+  alert(
+    `Ici on affichera l’historique des appels pour :\n\n` +
+      `${agent.name || 'Agent sans nom'}`
+  );
+}
+
+function showAgentStats(agent) {
+  // TODO : ouvrir un panneau avec les stats ACD de cet agent
+  console.log('[Superviseur] Stats agent', agent);
+  alert(
+    `Ici on affichera les statistiques ACD pour :\n\n` +
+      `${agent.name || 'Agent sans nom'}`
+  );
+}
+
+function toggleAgentRecording(agent) {
+  // TODO : il faudra lier ça à un callId précis si Wazo E-UC expose l’API
+  console.log('[Superviseur] Enregistrement agent (TODO)', agent);
+  alert(
+    `Ici on pilotera l’enregistrement / stop enregistrement\n` +
+      `pour l’appel en cours de : ${agent.name || 'Agent'}.`
+  );
+}
+
+function showAgentDetails(agent) {
+  const lines = [];
+
+  lines.push(`Nom : ${agent.name || '—'}`);
+  if (agent.id != null) lines.push(`ID agent : ${agent.id}`);
+  if (agent.userUuid) lines.push(`User UUID : ${agent.userUuid}`);
+  if (agent.number) lines.push(`Numéro / extension : ${agent.number}`);
+  if (agent.extension && agent.extension !== agent.number) {
+    lines.push(`Extension : ${agent.extension}`);
+  }
+
+  lines.push(`Connecté : ${agent.logged ? 'Oui' : 'Non'}`);
+  lines.push(`En pause : ${agent.paused ? 'Oui' : 'Non'}`);
+
+  alert(lines.join('\n'));
+}
 
 
 // -------------------------------------------------------------------
@@ -1405,17 +1477,78 @@ function startCallDurationTicker() {
   state.callDurationTimer = setInterval(update, 1000);
 }
 
-async function buildCallsByUserMap_EUC(callsRaw, api) {
+// -------------------------------------------------------------------
+// Persistance des timers d'appel (sur reload complet du plugin)
+// -------------------------------------------------------------------
+
+const CALL_TIMER_STORAGE_KEY = 'superviseur_call_timers_v1';
+
+function loadPersistedCallStarts() {
+  if (typeof localStorage === 'undefined') return {};
+  try {
+    const raw = localStorage.getItem(CALL_TIMER_STORAGE_KEY);
+    if (!raw) return {};
+    const obj = JSON.parse(raw);
+    if (obj && typeof obj === 'object') return obj;
+    return {};
+  } catch (e) {
+    console.warn('[Superviseur] Impossible de lire les timers persistés', e);
+    return {};
+  }
+}
+
+function savePersistedCallStarts(data) {
+  if (typeof localStorage === 'undefined') return;
+  try {
+    localStorage.setItem(CALL_TIMER_STORAGE_KEY, JSON.stringify(data));
+  } catch (e) {
+    console.warn('[Superviseur] Impossible de sauvegarder les timers persistés', e);
+  }
+}
+
+
+async function buildCallsByUserMap_EUC(callsRaw, api, previousMapFromCaller) {
   const map = new Map();
   if (!callsRaw) return map;
 
   const list = normalizeCollection(callsRaw);
-  const previousMap = state.callsByUser || new Map();
+
+  // Ancienne map (en mémoire, tant que la page n'est pas fermée)
+  const previousMap =
+    previousMapFromCaller instanceof Map
+      ? previousMapFromCaller
+      : state.callsByUser instanceof Map
+      ? state.callsByUser
+      : new Map();
+
+  // Timers persistés dans le navigateur (sur reload complet)
+  const persisted = loadPersistedCallStarts();
+  const activeIds = new Set(); // pour nettoyer les vieux timers
+
+  // Helper timestamp Wazo (ISO ou epoch)
+  const toTimestamp = (value) => {
+    if (!value) return NaN;
+
+    if (typeof value === 'number') {
+      if (!Number.isFinite(value)) return NaN;
+      return value > 1e12 ? value : value * 1000;
+    }
+
+    const s = String(value).trim();
+    if (!s) return NaN;
+
+    const n = Number(s);
+    if (Number.isFinite(n)) {
+      return n > 1e12 ? n : n * 1000;
+    }
+
+    return Date.parse(s);
+  };
 
   for (const call of list) {
     const data = call.data || call || {};
 
-    // --- Quel utilisateur (agent) est lié à cet appel ? ---
+    // --- User lié à l'appel ---
     const userUuid =
       data.user_uuid ||
       (Array.isArray(data.users) && data.users[0] && data.users[0].uuid) ||
@@ -1425,8 +1558,7 @@ async function buildCallsByUserMap_EUC(callsRaw, api) {
 
     if (!userUuid) continue;
 
-    // --- On ne garde que les appels DÉCROCHÉS ---
-    // On essaye plusieurs indices possibles de "answered"
+    // --- On ne garde que les appels DÉCROCHÉS / en cours ---
     const status = (data.status || '').toLowerCase();
     const isAnswered =
       !!data.answered_at ||
@@ -1435,21 +1567,18 @@ async function buildCallsByUserMap_EUC(callsRaw, api) {
       status === 'in-progress';
 
     if (!isAnswered) {
-      // Appel encore en sonnerie ou déjà terminé → pas de chrono
       continue;
     }
 
     // --- Extension de l’agent (pour exclure son propre numéro) ---
     const userInfo = state.usersByUuid && state.usersByUuid.get(userUuid);
-    const userExt = userInfo && userInfo.extension
-      ? String(userInfo.extension)
-      : null;
+    const userExt =
+      userInfo && userInfo.extension ? String(userInfo.extension) : null;
 
     // --- Quel numéro afficher ? (toujours l’AUTRE partie) ---
     let candidates;
 
     if (data.direction === 'outbound') {
-      // Sortant : numéro appelé
       candidates = [
         data.remote_callee_id_number,
         data.callee_id_number,
@@ -1458,7 +1587,6 @@ async function buildCallsByUserMap_EUC(callsRaw, api) {
         data.caller_id_number,
       ];
     } else if (data.direction === 'inbound') {
-      // Entrant : numéro de l’appelant externe
       candidates = [
         data.remote_caller_id_number,
         data.caller_id_number,
@@ -1466,7 +1594,6 @@ async function buildCallsByUserMap_EUC(callsRaw, api) {
         data.display_caller_name,
       ];
     } else {
-      // Interne / inconnu : on essaye de deviner
       candidates = [
         data.other_party_number,
         data.remote_caller_id_number,
@@ -1483,7 +1610,6 @@ async function buildCallsByUserMap_EUC(callsRaw, api) {
       if (!cand) continue;
       const s = String(cand).trim();
       if (!s) continue;
-      // On saute l’extension de l’agent
       if (userExt && s === userExt) continue;
       number = s;
       break;
@@ -1491,26 +1617,63 @@ async function buildCallsByUserMap_EUC(callsRaw, api) {
 
     const displayNumber = resolveNumberLabel(number || '');
 
-    // --- Date de début pour le timer ---
-    // On se cale sur started_at (moment où l'appel est établi côté Wazo).
-    // Si l'horloge du serveur est en avance, on "clampe" à maintenant.
-    let startedAtMs = null;
-    const now = Date.now();
+    // --- ID stable d'appel pour la persistance ---
+    const callId =
+      data.uuid ||
+      data.id ||
+      data.call_id ||
+      `${userUuid}:${number || ''}`;
 
-    if (data.started_at) {
-      const ts = Date.parse(data.started_at);
-      if (Number.isFinite(ts) && ts <= now) {
-        // started_at valide et pas dans le futur
-        startedAtMs = ts;
+    const now = Date.now();
+    let startedAtMs = NaN;
+
+    // 1) Essayer tous les timestamps Wazo possibles
+    const candidateDates = [
+      data.answered_at,
+      data.established_at,
+      data.bridge_at,
+      data.talking_at,
+      data.start_time,
+      data.started_at,
+      data.created_at,
+    ];
+
+    for (const v of candidateDates) {
+      const ts = toTimestamp(v);
+      if (!Number.isFinite(ts)) continue;
+      if (ts > now) continue;
+      startedAtMs = ts;
+      break;
+    }
+
+    // 2) Sinon : on réutilise l'ancien startedAt en mémoire (même user + numéro)
+    if (!Number.isFinite(startedAtMs)) {
+      const prev = previousMap.get(userUuid);
+      if (
+        prev &&
+        prev.rawNumber === number &&
+        Number.isFinite(prev.startedAt)
+      ) {
+        startedAtMs = prev.startedAt;
       }
     }
 
-    // Si le serveur nous donne un started_at dans le futur
-    // ou rien du tout, on démarre le chrono au moment où
-    // l'appel apparaît dans le plugin.
+    // 3) Sinon : on regarde dans le localStorage (persistance entre reload)
+    if (!Number.isFinite(startedAtMs)) {
+      const persistedValue = persisted[callId];
+      if (Number.isFinite(persistedValue)) {
+        startedAtMs = persistedValue;
+      }
+    }
+
+    // 4) Dernier fallback : maintenant
     if (!Number.isFinite(startedAtMs)) {
       startedAtMs = now;
     }
+
+    // On marque ce callId comme "actif" et on met à jour la valeur persistée
+    activeIds.add(callId);
+    persisted[callId] = startedAtMs;
 
     map.set(userUuid, {
       number: displayNumber,
@@ -1520,9 +1683,20 @@ async function buildCallsByUserMap_EUC(callsRaw, api) {
     });
   }
 
+  // Nettoyage : on supprime du localStorage les appels qui ne sont plus actifs
+  for (const key of Object.keys(persisted)) {
+    if (!activeIds.has(key)) {
+      delete persisted[key];
+    }
+  }
+  savePersistedCallStarts(persisted);
+
   console.log('[Superviseur] callsByUser EUC construit', map);
   return map;
 }
+
+
+
 
 async function ensurePhonebookIndex() {
   // Si on a déjà chargé l'annuaire
@@ -1860,8 +2034,9 @@ function renderQueues(groups, api, queuesMeta) {
     const badgeOffline = document.createElement('span');
     badgeOffline.className = 'badge badge--muted';
 
-    const badgeCalls = document.createElement('span');
-    badgeCalls.className = 'badge badge--muted';
+const badgeCalls = document.createElement('span');
+badgeCalls.className = 'badge badge--muted';
+badgeCalls.dataset.role = 'queue-calls'; // 👈 pour le retrouver plus tard
 
     const updateHeaderStats = () => {
       const presence = computeQueuePresence(rows);
@@ -2040,16 +2215,19 @@ table.appendChild(thead);
 
 
       // 💬 Appel en cours (map userUuid -> callInfo)
-      const callInfo =
-        agent.userUuid && callsByUser.has(agent.userUuid)
-          ? callsByUser.get(agent.userUuid)
-          : null;
+        // 💬 Appel en cours (map userUuid -> callInfo)
+  const callInfo =
+    agent.userUuid && callsByUser.has(agent.userUuid)
+      ? callsByUser.get(agent.userUuid)
+      : null;
 
-      const callCellHtml = buildCallChipHtml(callInfo);
+  // HTML initial de la cellule "APPEL EN COURS"
+  const callCellHtml = buildCallChipHtml(callInfo);
 
-      let supervisionCell = null;
-      let transferCell = null;
-      let actionsCell = null;
+  let supervisionCell = null;
+  let transferCell = null;
+  let actionsCell = null;
+
 
       if (isParking) {
         // Hors call center : Nom / Extension / Disponibilité / Transfert / DND
@@ -2263,162 +2441,180 @@ if (transferCell) {
 
 
 if (!isParking) {
-      // SUPERVISION (Join / Spy / Whisper)
-const joinBtn = createActionButton('Join', 'secondary');
-const spyBtn = createActionButton('Spy', 'secondary');
-const whisperBtn = createActionButton('Whisper', 'secondary');
+  // === BOUTONS SUPERVISEUR (NOUVEAUX + SPY conservé) ===
+  const callBtn   = createActionButton('Appeler', 'secondary');
+  const spyBtn    = createActionButton('Spy', 'secondary');         // 🔥 KEEP SPY
+  const histBtn   = createActionButton('Historique', 'secondary');
+  const statsBtn  = createActionButton('Stats agent', 'secondary');
+  const recBtn    = createActionButton('Enregistrer', 'secondary');
+  const detailBtn = createActionButton('Détail', 'secondary');
 
-// ➕ on marque ces 3 boutons comme boutons de supervision
-[joinBtn, spyBtn, whisperBtn].forEach((btn) => {
-  btn.disabled = !agent.logged;
-  btn.classList.add('btn-supervision');
-});
+  const supervisionButtons = [
+    callBtn,
+    spyBtn,
+    histBtn,
+    statsBtn,
+    recBtn,
+    detailBtn
+  ];
 
-      joinBtn.addEventListener('click', () =>
-        superviseAgentCall('join', agent, api)
-      );
-      spyBtn.addEventListener('click', () =>
-        superviseAgentCall('spy', agent, api)
-      );
-      whisperBtn.addEventListener('click', () =>
-        superviseAgentCall('whisper', agent, api)
-      );
+  supervisionButtons.forEach((btn) => {
+    btn.classList.add('btn-supervision');
+    btn.disabled = !agent.logged;
+  });
 
-      supervisionCell.appendChild(joinBtn);
-      supervisionCell.appendChild(spyBtn);
-      supervisionCell.appendChild(whisperBtn);
+  // === Actions ===
+  callBtn.addEventListener('click', () =>
+    callAgentFromSupervisor(agent, api)
+  );
 
-      // BOUTON PAUSE / REPRENDRE
-      const pauseBtn = createActionButton(
-        agent.paused ? 'Reprendre' : 'Pause',
-        'secondary'
-      );
+  // 🔥 SPY UTILISE TOUJOURS superviseAgentCall('spy')
+  spyBtn.addEventListener('click', () =>
+    superviseAgentCall('spy', agent, api)
+  );
 
+  histBtn.addEventListener('click', () => showAgentHistory(agent));
+  statsBtn.addEventListener('click', () => showAgentStats(agent));
+  recBtn.addEventListener('click', () => toggleAgentRecording(agent));
+  detailBtn.addEventListener('click', () => showAgentDetails(agent));
 
-      pauseBtn.disabled = !agent.logged;
-      pauseBtn.classList.add('agent-pause-btn');
+  // Injection dans la cellule supervision
+  supervisionCell.appendChild(callBtn);
+  supervisionCell.appendChild(spyBtn);      // 🔥 IMPORTANT — SPIY est ici
+  supervisionCell.appendChild(histBtn);
+  supervisionCell.appendChild(statsBtn);
+  supervisionCell.appendChild(recBtn);
+  supervisionCell.appendChild(detailBtn);
 
-pauseBtn.classList.toggle(
-  'btn--pause-active',
-  agent.logged && agent.paused
-);
+  // BOUTON PAUSE / REPRENDRE (TON CODE ACTUEL, ON LE GARDE TEL QUEL)
+  const pauseBtn = createActionButton(
+    agent.paused ? 'Reprendre' : 'Pause',
+    'secondary'
+  );
 
-      pauseBtn.addEventListener('click', async () => {
-  const wasPaused = !!agent.paused;
-  const newPaused = !wasPaused;
+  pauseBtn.disabled = !agent.logged;
+  pauseBtn.classList.add('agent-pause-btn');
 
-  // 🔸 Mise à jour immédiate de l’UI (rapide, sans attendre l’API)
-  agent.paused = newPaused;
-  syncAgentDom(agent);
+  pauseBtn.classList.toggle(
+    'btn--pause-active',
+    agent.logged && agent.paused
+  );
 
-  try {
-    pauseBtn.disabled = true;
+  pauseBtn.addEventListener('click', async () => {
+    const wasPaused = !!agent.paused;
+    const newPaused = !wasPaused;
 
-    const agentNumber = agent.number || agent.extension;
-    if (!agentNumber) {
-      throw new Error(
-        `Numéro d'agent introuvable pour ${agent.name} (id=${agent.id}).`
-      );
-    }
-
-    const basePath = `/api/agentd/1.0/agents/by-number/${agentNumber}`;
-    const path = newPaused
-      ? `${basePath}/pause`
-      : `${basePath}/unpause`;
-
-    const options = { method: 'POST' };
-    if (newPaused) {
-      options.body = { reason: 'plugin-superviseur' };
-    }
-
-    console.log('[Superviseur] PAUSE/UNPAUSE', path, options, agent);
-    await api(path, options);
-
-    updateHeaderStats();
-    flashUpdating();
-  } catch (err) {
-    console.error('[Superviseur] Erreur pause/reprendre', err);
-    alert(
-      'Erreur lors du changement de pause de cet agent.\n' +
-        (err.message || '')
-    );
-
-    // ⏪ En cas d’erreur, on revient à l’ancien état
-    agent.paused = wasPaused;
+    // 🔸 Mise à jour immédiate de l’UI (rapide, sans attendre l’API)
+    agent.paused = newPaused;
     syncAgentDom(agent);
-  } finally {
-    pauseBtn.disabled = !agent.logged;
-  }
-});
 
+    try {
+      pauseBtn.disabled = true;
 
-            // BOUTON LOGIN / LOGOUT
-      const loginBtn = document.createElement('button');
-      loginBtn.type = 'button';
-      loginBtn.textContent = agent.logged ? 'Logout' : 'Login';
-      setLoginButtonStyle(loginBtn, agent.logged);
-      loginBtn.classList.add('agent-login-btn');
+      const agentNumber = agent.number || agent.extension;
+      if (!agentNumber) {
+        throw new Error(
+          `Numéro d'agent introuvable pour ${agent.name} (id=${agent.id}).`
+        );
+      }
 
-      loginBtn.addEventListener('click', async () => {
-        const wasLogged = !!agent.logged;
-        const newLogged = !wasLogged;
+      const basePath = `/api/agentd/1.0/agents/by-number/${agentNumber}`;
+      const path = newPaused
+        ? `${basePath}/pause`
+        : `${basePath}/unpause`;
 
-        // 🔸 Mise à jour immédiate de l’UI (comme pour Pause)
-        agent.logged = newLogged;
-        if (!newLogged) {
-          // si on se délogue → plus en pause
-          agent.paused = false;
-        }
-        syncAgentDom(agent);
+      const options = { method: 'POST' };
+      if (newPaused) {
+        options.body = { reason: 'plugin-superviseur' };
+      }
 
-        try {
-          loginBtn.disabled = true;
+      console.log('[Superviseur] PAUSE/UNPAUSE', path, options, agent);
+      await api(path, options);
 
-          const basePath = `/api/agentd/1.0/agents/by-id/${agent.id}`;
-          const path = newLogged
-            ? `${basePath}/login`
-            : `${basePath}/logoff`;
+      updateHeaderStats();
+      flashUpdating();
+    } catch (err) {
+      console.error('[Superviseur] Erreur pause/reprendre', err);
+      alert(
+        'Erreur lors du changement de pause de cet agent.\n' +
+          (err.message || '')
+      );
 
-          const options = { method: 'POST' };
-
-          if (newLogged) {
-            // On se logue → il faut extension + context
-            const { extension, context } = await resolveAgentLoginTarget(
-              agent,
-              api
-            );
-            options.body = { extension, context };
-          }
-
-          console.log('[Superviseur] LOGIN/LOGOFF', path, options, agent);
-          await api(path, options);
-
-          // API OK → juste maj stats + petit flash
-          updateHeaderStats();
-          flashUpdating();
-        } catch (err) {
-          console.error('[Superviseur] Erreur login/logout', err);
-          alert(
-            'Erreur lors du login/logout de cet agent.\n' +
-              (err.message || '')
-          );
-
-          // ⏪ Rollback en cas d’erreur
-          agent.logged = wasLogged;
-          if (!agent.logged) {
-            agent.paused = false;
-          }
-          syncAgentDom(agent);
-        } finally {
-          loginBtn.disabled = false;
-        }
-      });
-
-      actionsCell.appendChild(pauseBtn);
-      actionsCell.appendChild(loginBtn);
-
-      
+      // ⏪ En cas d’erreur, on revient à l’ancien état
+      agent.paused = wasPaused;
+      syncAgentDom(agent);
+    } finally {
+      pauseBtn.disabled = !agent.logged;
     }
+  });
+
+  // BOUTON LOGIN / LOGOUT (TON CODE ACTUEL, ON LE GARDE)
+  const loginBtn = document.createElement('button');
+  loginBtn.type = 'button';
+  loginBtn.textContent = agent.logged ? 'Logout' : 'Login';
+  setLoginButtonStyle(loginBtn, agent.logged);
+  loginBtn.classList.add('agent-login-btn');
+
+  loginBtn.addEventListener('click', async () => {
+    const wasLogged = !!agent.logged;
+    const newLogged = !wasLogged;
+
+    // 🔸 Mise à jour immédiate de l’UI (comme pour Pause)
+    agent.logged = newLogged;
+    if (!newLogged) {
+      // si on se délogue → plus en pause
+      agent.paused = false;
+    }
+    syncAgentDom(agent);
+
+    try {
+      loginBtn.disabled = true;
+
+      const basePath = `/api/agentd/1.0/agents/by-id/${agent.id}`;
+      const path = newLogged
+        ? `${basePath}/login`
+        : `${basePath}/logoff`;
+
+      const options = { method: 'POST' };
+
+      if (newLogged) {
+        // On se logue → il faut extension + context
+        const { extension, context } = await resolveAgentLoginTarget(
+          agent,
+          api
+        );
+        options.body = { extension, context };
+      }
+
+      console.log('[Superviseur] LOGIN/LOGOFF', path, options, agent);
+      await api(path, options);
+
+      // API OK → juste maj stats + petit flash
+      updateHeaderStats();
+      flashUpdating();
+    } catch (err) {
+      console.error('[Superviseur] Erreur login/logout', err);
+      alert(
+        'Erreur lors du login/logout de cet agent.\n' +
+          (err.message || '')
+      );
+
+      // ⏪ Rollback en cas d’erreur
+      agent.logged = wasLogged;
+      if (!agent.logged) {
+        agent.paused = false;
+      }
+      syncAgentDom(agent);
+    } finally {
+      loginBtn.disabled = false;
+    }
+  });
+
+  // On laisse bien pause+login dans actionsCell comme tu l’avais :
+  actionsCell.appendChild(pauseBtn);
+  actionsCell.appendChild(loginBtn);
+}
+
   
     tbody.appendChild(tr);
   
@@ -2568,6 +2764,31 @@ const newMap = await buildCallsByUserMap_EUC(callsRaw, api, oldMap);
   }
 }
 
+// Rafraîchit UNIQUEMENT les stats de files ACD depuis call-logd
+async function refreshQueueStatsFromApi(api) {
+  try {
+    const { from, until } = buildStatsPeriod();
+
+    const queuesStatsRaw = await api(
+      `/api/call-logd/1.0/queues/statistics?from=${encodeURIComponent(
+        from
+      )}&until=${encodeURIComponent(until)}`,
+      { method: 'GET' }
+    );
+
+    const newStats = buildQueueStatsByQueueMap(queuesStatsRaw);
+    state.queueStats = newStats;
+
+    // 🔥 Mise à jour des badges sans rerender complet
+    updateQueueStatsDom(newStats);
+  } catch (e) {
+    console.warn(
+      '[Superviseur] Impossible de rafraîchir les stats call-logd :',
+      e
+    );
+  }
+}
+
 
 // Met à jour UNIQUEMENT la/les lignes d’un user pour la colonne "APPEL EN COURS"
 function refreshCallCellForUser(userUuid) {
@@ -2617,6 +2838,39 @@ function refreshCallCellForUser(userUuid) {
   });
 }
 
+// Met à jour UNIQUEMENT les badges "Reçus / Répondus / Manqués" des cartes
+function updateQueueStatsDom(newStats) {
+  const statsMap = newStats || state.queueStats || new Map();
+  if (!containerEl) return;
+
+  document.querySelectorAll('.queue-card').forEach((section) => {
+    const queueIdStr = section.dataset.queueId;
+    if (!queueIdStr) return; // pas de stats pour Hors call center
+
+    const queueId = Number(queueIdStr);
+    const callStats = statsMap.get(queueId);
+    const badgeCalls = section.querySelector(
+      '.badge[data-role="queue-calls"]'
+    );
+    if (!badgeCalls) return;
+
+    if (callStats) {
+      const received =
+        callStats.total_calls ??
+        callStats.received ??
+        callStats.calls ??
+        0;
+      const answered =
+        callStats.answered_calls ?? callStats.answered ?? 0;
+      const missed =
+        callStats.missed_calls ?? callStats.missed ?? 0;
+
+      badgeCalls.textContent = `Reçus: ${received} · Répondus: ${answered} · Manqués: ${missed} (9h–18h)`;
+    } else {
+      badgeCalls.textContent = 'Statistiques 9h–18h indisponibles';
+    }
+  });
+}
 
 
 
@@ -2681,6 +2935,57 @@ function buildStatsPeriod() {
     until: until.toISOString(),
   };
 }
+
+// Construit la Map queue_id -> stats (reçus / répondus / manqués)
+function buildQueueStatsByQueueMap(queuesStatsRaw) {
+  const map = new Map();
+  if (!queuesStatsRaw) return map;
+
+  const items = Array.isArray(queuesStatsRaw.items)
+    ? queuesStatsRaw.items
+    : Array.isArray(queuesStatsRaw)
+    ? queuesStatsRaw
+    : [];
+
+  items.forEach((s) => {
+    const qid = s.queue_id ?? s.queueId ?? s.id;
+    if (!qid) return;
+
+    const total =
+      s.total_calls ??
+      s.received ??
+      s.calls ??
+      s.incoming_calls ??
+      0;
+
+    const answered =
+      s.answered_calls ??
+      s.answered ??
+      s.taken ??
+      0;
+
+    let missed =
+      s.missed_calls ??
+      s.missed ??
+      s.lost_calls ??
+      s.abandoned_calls ??
+      null;
+
+    // Fallback si pas de champ spécifique
+    if ((missed == null || missed < 0) && total >= answered) {
+      missed = total - answered;
+    }
+
+    map.set(qid, {
+      total_calls: total,
+      answered_calls: answered,
+      missed_calls: missed ?? 0,
+    });
+  });
+
+  return map;
+}
+
 
 async function loadData(api, { silent = false } = {}) {
   if (!silent) {
@@ -2779,31 +3084,22 @@ console.log('[Superviseur] Présences reçues', presencesRaw);
   state.userForwards = await loadUserForwards(api, userUuidSet);
 
   // Stats files 9h–18h depuis call-logd
-  const queueStatsMap = new Map();
+  state.queueStats = buildQueueStatsByQueueMap(queuesStatsRaw);
 
-if (queuesStatsRaw) {
-  const items = Array.isArray(queuesStatsRaw.items)
-    ? queuesStatsRaw.items
-    : Array.isArray(queuesStatsRaw)
-    ? queuesStatsRaw
-    : [];
-
-  items.forEach((s) => {
-    const qid = s.queue_id ?? s.queueId ?? s.id;
-    if (!qid) return;
-
-    queueStatsMap.set(qid, {
-      total_calls:
-        s.total_calls ?? s.received ?? s.calls ?? 0,
-      answered_calls: s.answered_calls ?? s.answered ?? 0,
-      missed_calls: s.missed_calls ?? s.missed ?? 0,
-    });
-  });
-}
-
-state.queueStats = queueStatsMap;
 
 renderQueues(groups, api, queuesMeta);
+
+// 🌟 Après un chargement complet, on met à jour toutes les cellules "APPEL EN COURS"
+if (state.callsByUser && state.callsByUser.size && typeof refreshCallCellForUser === 'function') {
+  for (const userUuid of state.callsByUser.keys()) {
+    refreshCallCellForUser(userUuid);
+  }
+
+  // Et on relance le timer global des durées
+  if (typeof startCallDurationTicker === 'function') {
+    startCallDurationTicker();
+  }
+}
 
     if (!silent) {
       setStatus('Agents chargés.', 'success');
@@ -3040,14 +3336,14 @@ if (
       ev === 'call.log.created' ||
       ev === 'call.log.user.created'
     ) {
-      // Ici, refreshCallsFromApi(api) :
-      //  - fait un GET /api/calld/1.0/calls
-      //  - reconstruit callsByUser (Map)
-      //  - compare avec l'ancien Map
-      //  - met à jour UNIQUEMENT les cellules des users impactés
-      await refreshCallsFromApi(api);
+      // 🔁 Appels en cours + stats ACD en temps (quasi) réel
+      await Promise.all([
+        refreshCallsFromApi(api),
+        refreshQueueStatsFromApi(api),
+      ]);
       return;
     }
+
 
 // ======================================================
 // X) Présence / disponibilité (chatd_presence_updated)
