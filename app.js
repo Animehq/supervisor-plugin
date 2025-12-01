@@ -1408,7 +1408,6 @@ async function fetchAgentCdr(agent, { days = 7, limit = 50 } = {}) {
   return [];
 }
 
-// Historique des derniers appels
 async function showAgentStats(agent) {
   if (!agent || agent.id == null || !agent.userUuid) {
     alert("Impossible de récupérer les stats : id agent ou userUuid manquant.");
@@ -1421,115 +1420,620 @@ async function showAgentStats(agent) {
 
   const api = state.api;
 
-  // 📅 7 derniers jours glissants
+  // Date -> valeur pour input datetime-local
+  const toInputLocal = (date) => {
+    const d = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+    return d.toISOString().slice(0, 16);
+  };
+
   const now = new Date();
-  const until = now.toISOString();
-  const fromDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-  const from = fromDate.toISOString();
+  const defaultUntil = now;
+  const defaultFrom = new Date(now.getTime() - 7 * 86400000);
 
-const cdrPath =
-  `/api/call-logd/1.0/users/${encodeURIComponent(agent.userUuid)}/cdr` +
-  `?from=${encodeURIComponent(from)}` +
-  `&until=${encodeURIComponent(until)}` +
-  `&limit=1000` +
-  `&direction=desc` +    // ✅ sens du tri
-  `&order=start`;
+  // ========== UI MODALE ==========
+  const wrapper = document.createElement('div');
+  wrapper.className = 'stats-modal enhanced-acd-stats';
 
+  const filter = document.createElement('div');
+  filter.className = 'stats-filter';
 
-  const statsPath =
-    `/api/call-logd/1.0/agents/${encodeURIComponent(
-      String(agent.id)
-    )}/statistics` +
-    `?from=${encodeURIComponent(from)}` +
-    `&until=${encodeURIComponent(until)}`;
+  const labelPeriod = document.createElement('div');
+  labelPeriod.className = 'stats-filter__label';
+  labelPeriod.textContent = 'Période';
 
-  try {
-    setStatus(`Chargement des stats pour ${agent.name}…`, 'info');
-    console.log('[Superviseur] Stats agent (7j) ->', statsPath);
-    console.log('[Superviseur] Stats CDR user (7j) ->', cdrPath);
+  const fromGroup = document.createElement('div');
+  fromGroup.className = 'stats-filter__field';
+  const fromLabel = document.createElement('span');
+  fromLabel.textContent = 'Du';
+  const fromInput = document.createElement('input');
+  fromInput.type = 'datetime-local';
+  fromInput.value = toInputLocal(defaultFrom);
+  fromGroup.append(fromLabel, fromInput);
 
-    const [cdrRes, statsRes] = await Promise.all([
-      api(cdrPath, { method: 'GET' }),
-      api(statsPath, { method: 'GET' }),
-    ]);
+  const untilGroup = document.createElement('div');
+  untilGroup.className = 'stats-filter__field';
+  const untilLabel = document.createElement('span');
+  untilLabel.textContent = 'Au';
+  const untilInput = document.createElement('input');
+  untilInput.type = 'datetime-local';
+  untilInput.value = toInputLocal(defaultUntil);
+  untilGroup.append(untilLabel, untilInput);
 
-    // ---------- 1) Statistiques à partir des CDR ----------
-    const cdrList = Array.isArray(cdrRes)
-      ? cdrRes
-      : cdrRes.items || cdrRes.calls || cdrRes.cdr || [];
+  const btnApply = document.createElement('button');
+  btnApply.className = 'btn btn--primary btn--sm';
+  btnApply.textContent = 'Afficher';
 
-    let totalCalls = 0;
-    let answeredCount = 0;
-    let missedCount = 0;
-    let convSecondsCdr = 0;
+  const btnToday = document.createElement('button');
+  btnToday.className = 'btn btn--secondary btn--sm';
+  btnToday.textContent = 'Aujourd’hui';
 
-    for (const cdr of cdrList) {
-      totalCalls += 1;
+  const btn7 = document.createElement('button');
+  btn7.className = 'btn btn--secondary btn--sm';
+  btn7.textContent = '7 jours';
 
-      const answered =
-        cdr.answered === true ||
-        cdr.answered_at ||
-        (cdr.disposition &&
-          String(cdr.disposition).toLowerCase() === 'answered') ||
-        (cdr.call_status &&
-          String(cdr.call_status).toLowerCase() === 'answered');
+  const btn30 = document.createElement('button');
+  btn30.className = 'btn btn--secondary btn--sm';
+  btn30.textContent = '30 jours';
 
-      if (answered) answeredCount += 1;
+  const btnManager = document.createElement('button');
+  btnManager.className = 'btn btn--secondary btn--sm';
+  btnManager.textContent = 'Vue manager';
 
-      const dur = cdr.duration || cdr.billsec || cdr.talking_duration || 0;
-      convSecondsCdr += dur;
-    }
+  const presets = document.createElement('div');
+  presets.className = 'stats-filter__presets';
+  presets.append(btnApply, btnToday, btn7, btn30, btnManager);
 
-    missedCount = Math.max(0, totalCalls - answeredCount);
+  filter.append(labelPeriod, fromGroup, untilGroup, presets);
 
-    // ---------- 2) Statistiques ACD (login/pause/etc.) ----------
-    const items = (statsRes && (statsRes.items || statsRes.statistics)) || [];
-    let agg = null;
-    if (items.length) {
-      agg = items[items.length - 1]; // dernier = agrégat de la période
-    }
+  const results = document.createElement('div');
+  results.className = 'stats-results';
+  results.innerHTML = '<p>Chargement…</p>';
 
-    const convSecondsAcd = (agg && agg.conversation_time) || 0;
-    const pauseSeconds = (agg && agg.pause_time) || 0;
-    const loginSeconds = (agg && agg.login_time) || 0;
-    const wrapupSeconds = (agg && agg.wrapup_time) || 0;
+  wrapper.append(filter, results);
+  openSupervisorModal(`Stats ACD – ${agent.name}`, wrapper);
 
-    const fmt = (seconds) => {
-      const s = Math.max(0, Math.floor(seconds || 0));
-      const h = Math.floor(s / 3600);
-      const m = Math.floor((s % 3600) / 60);
-      const sec = s % 60;
-      if (h > 0) {
-        return `${h}h${String(m).padStart(2, '0')}m${String(sec).padStart(2, '0')}s`;
+  // Format durées
+  const fmt = (sec) => {
+    sec = Math.floor(sec || 0);
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = sec % 60;
+    return `${h}h${m.toString().padStart(2, '0')}m${s
+      .toString()
+      .padStart(2, '0')}s`;
+  };
+
+  // ========== CHARGEMENT DES STATS ==========
+  async function loadStats() {
+    const fromIso = new Date(fromInput.value).toISOString();
+    const untilIso = new Date(untilInput.value).toISOString();
+
+    const statsPath =
+      `/api/call-logd/1.0/agents/${agent.id}/statistics` +
+      `?from=${encodeURIComponent(fromIso)}` +
+      `&until=${encodeURIComponent(untilIso)}`;
+
+    const cdrPath =
+      `/api/call-logd/1.0/users/${agent.userUuid}/cdr` +
+      `?from=${encodeURIComponent(fromIso)}` +
+      `&until=${encodeURIComponent(untilIso)}` +
+      `&limit=500&direction=desc&order=start`;
+
+    try {
+      const [statsRes, cdrRes] = await Promise.all([
+        api(statsPath),
+        api(cdrPath),
+      ]);
+
+      console.log('[Superviseur] Stats ACD brutes :', statsRes);
+
+      // --- AgentStatistics : on prend le dernier item comme agrégat ---
+      const statsItems =
+        statsRes && Array.isArray(statsRes.items) ? statsRes.items : [];
+      const agg = statsItems.length
+        ? statsItems[statsItems.length - 1]
+        : statsRes || {};
+
+      // helper pour récupérer un nombre sur plusieurs clés possibles
+      const getNum = (...keys) => {
+        for (const k of keys) {
+          if (agg && agg[k] != null) return Number(agg[k]) || 0;
+        }
+        return 0;
+      };
+
+      // ---- Temps ACD (en secondes) ----
+      const acdTalk = getNum(
+        'conversation_time',
+        'talk_time',
+        'talking_time',
+        'talking_duration',
+        'acd_talking_duration'
+      );
+      const acdLogin = getNum(
+        'login_time',
+        'logged_time',
+        'login_duration',
+        'acd_login_duration'
+      );
+      const acdPause = getNum(
+        'pause_time',
+        'pause_duration',
+        'acd_pause_duration'
+      );
+      const acdWrapup = getNum(
+        'wrapup_time',
+        'aftercall_time',
+        'aftercall_duration',
+        'acd_wrapup_duration'
+      );
+
+      // ---- Volumes d’appels ACD ----
+      let acdCalls = getNum(
+        'call_count',
+        'acd_call_count',
+        'acd_calls',
+        'total_calls',
+        'calls'
+      );
+      let acdAnswered = getNum(
+        'answered_count',
+        'acd_answered_count',
+        'answered_calls',
+        'answered'
+      );
+      let acdMissed = getNum(
+        'missed_count',
+        'acd_missed_count',
+        'missed_calls',
+        'missed'
+      );
+
+      // --- CDR USER ---
+      const cdr = Array.isArray(cdrRes)
+        ? cdrRes
+        : cdrRes.items || cdrRes.cdr || [];
+
+      const totalCdr = cdr.length;
+
+      const answeredCdr = cdr.filter((x) => {
+        const disp = (
+          x.disposition ||
+          x.call_status ||
+          ''
+        )
+          .toString()
+          .toLowerCase();
+        return x.answered === true || x.answered_at || disp === 'answered';
+      }).length;
+
+      const missedCdr = totalCdr - answeredCdr;
+
+      const convCdrSeconds = cdr.reduce(
+        (s, x) => s + (x.duration || 0),
+        0
+      );
+
+      // 🛟 fallback : si les compteurs ACD sont à 0 mais qu’on a des CDR,
+      // on reprend les chiffres CDR pour avoir des KPI cohérents
+      if (acdCalls === 0 && totalCdr > 0) {
+        acdCalls = totalCdr;
       }
-      return `${m}m${String(sec).padStart(2, '0')}s`;
-    };
+      if (acdAnswered === 0 && answeredCdr > 0) {
+        acdAnswered = answeredCdr;
+      }
+      if (acdMissed === 0 && missedCdr > 0) {
+        acdMissed = missedCdr;
+      }
 
-    const body = document.createElement('div');
-    body.innerHTML = `
-      <p><strong>Période :</strong> 7 derniers jours</p>
-      <p><strong>Total appels (CDR utilisateur) :</strong> ${totalCalls}</p>
-      <p><strong>Répondus :</strong> ${answeredCount}</p>
-      <p><strong>Manqués :</strong> ${missedCount}</p>
-      <p><strong>Temps de conversation (CDR) :</strong> ${fmt(convSecondsCdr)}</p>
-      <hr>
-      <p><strong>Temps de conversation ACD :</strong> ${fmt(convSecondsAcd)}</p>
-      <p><strong>Temps connecté (login ACD) :</strong> ${fmt(loginSeconds)}</p>
-      <p><strong>Temps en pause ACD :</strong> ${fmt(pauseSeconds)}</p>
-      <p><strong>Temps post-appel (wrapup) :</strong> ${fmt(wrapupSeconds)}</p>
-    `;
+      // KPI
+      const acdReplyRate =
+        acdCalls > 0 ? Math.round((acdAnswered / acdCalls) * 100) : 0;
+      const pauseRate =
+        acdLogin > 0 ? Math.round((acdPause / acdLogin) * 100) : 0;
+      const talkRate =
+        acdLogin > 0 ? Math.round((acdTalk / acdLogin) * 100) : 0;
+      const wrapRate =
+        acdLogin > 0 ? Math.round((acdWrapup / acdLogin) * 100) : 0;
 
-    openSupervisorModal(`Stats (7 jours) – ${agent.name}`, body);
-    setStatus('Stats agent chargées.', 'success');
-  } catch (err) {
-    console.error('[Superviseur] Erreur showAgentStats', err);
-    setStatus('Erreur lors du chargement des stats.', 'error');
-    openSupervisorModal(
-      `Stats – ${agent.name}`,
-      `Impossible de charger les stats.\n${err && err.message ? err.message : 'Erreur API call-logd'}`
-    );
+      const answeredRatio =
+        acdCalls > 0 ? Math.round((acdAnswered / acdCalls) * 100) : 0;
+      const missedRatio =
+        acdCalls > 0 ? Math.round((acdMissed / acdCalls) * 100) : 0;
+
+      // ========== RENDER UI ==========
+      results.innerHTML = `
+        <section class="kpi-block">
+          <div class="kpi-title">Résumé ACD</div>
+          <div class="kpi-grid">
+            <div class="kpi-item"><span>Taux de réponse</span><strong>${acdReplyRate}%</strong></div>
+            <div class="kpi-item"><span>Appels traités</span><strong>${acdAnswered}</strong></div>
+            <div class="kpi-item"><span>Appels manqués</span><strong>${acdMissed}</strong></div>
+            <div class="kpi-item"><span>Temps en com</span><strong>${fmt(acdTalk)}</strong></div>
+            <div class="kpi-item"><span>Temps logué</span><strong>${fmt(acdLogin)}</strong></div>
+            <div class="kpi-item"><span>% Pause</span><strong>${pauseRate}%</strong></div>
+            <div class="kpi-item"><span>% Conversation</span><strong>${talkRate}%</strong></div>
+            <div class="kpi-item"><span>Wrap-up</span><strong>${fmt(acdWrapup)}</strong></div>
+          </div>
+        </section>
+
+        <section class="kpi-block">
+          <div class="kpi-title">Graphiques</div>
+          <div class="chart-grid">
+            <div class="chart-card">
+              <h4>Répartition du temps ACD</h4>
+              <div class="chart-bar">
+                <div class="chart-bar__segment chart-bar__talk"  style="width:${talkRate}%;"></div>
+                <div class="chart-bar__segment chart-bar__pause" style="width:${pauseRate}%;"></div>
+                <div class="chart-bar__segment chart-bar__wrap"  style="width:${wrapRate}%;"></div>
+              </div>
+              <ul class="chart-legend">
+                <li><span class="legend-dot legend-talk"></span>Conversation (${talkRate}%)</li>
+                <li><span class="legend-dot legend-pause"></span>Pause (${pauseRate}%)</li>
+                <li><span class="legend-dot legend-wrap"></span>Wrap-up (${wrapRate}%)</li>
+              </ul>
+            </div>
+
+            <div class="chart-card">
+              <h4>Issue des appels ACD</h4>
+              <div class="chart-bar">
+                <div class="chart-bar__segment chart-bar__answered" style="width:${answeredRatio}%;"></div>
+                <div class="chart-bar__segment chart-bar__missed"   style="width:${missedRatio}%;"></div>
+              </div>
+              <ul class="chart-legend">
+                <li><span class="legend-dot legend-answered"></span>Répondus (${acdAnswered})</li>
+                <li><span class="legend-dot legend-missed"></span>Manqués (${acdMissed})</li>
+              </ul>
+            </div>
+          </div>
+        </section>
+
+        <section class="kpi-block kpi-block--split">
+          <div class="kpi-subblock">
+            <div class="kpi-title">Activité ACD (détails)</div>
+            <table class="stats-table">
+              <tbody>
+                <tr>
+                  <td>Appels totaux ACD</td>
+                  <td class="stats-table__value">${acdCalls}</td>
+                </tr>
+                <tr>
+                  <td>Répondus</td>
+                  <td class="stats-table__value">${acdAnswered}</td>
+                </tr>
+                <tr>
+                  <td>Manqués</td>
+                  <td class="stats-table__value">${acdMissed}</td>
+                </tr>
+                <tr>
+                  <td>Temps en conversation</td>
+                  <td class="stats-table__value">${fmt(acdTalk)}</td>
+                </tr>
+                <tr>
+                  <td>Temps logué</td>
+                  <td class="stats-table__value">${fmt(acdLogin)}</td>
+                </tr>
+                <tr>
+                  <td>Temps en pause</td>
+                  <td class="stats-table__value">${fmt(acdPause)}</td>
+                </tr>
+                <tr>
+                  <td>Temps post appel</td>
+                  <td class="stats-table__value">${fmt(acdWrapup)}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="kpi-subblock">
+            <div class="kpi-title">Activité utilisateur (CDR)</div>
+            <table class="stats-table">
+              <tbody>
+                <tr>
+                  <td>Total appels</td>
+                  <td class="stats-table__value">${totalCdr}</td>
+                </tr>
+                <tr>
+                  <td>Répondus</td>
+                  <td class="stats-table__value">${answeredCdr}</td>
+                </tr>
+                <tr>
+                  <td>Manqués</td>
+                  <td class="stats-table__value">${missedCdr}</td>
+                </tr>
+                <tr>
+                  <td>Durée totale</td>
+                  <td class="stats-table__value">${fmt(convCdrSeconds)}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      `;
+
+    } catch (err) {
+      console.error('[Superviseur] Erreur showAgentStats', err);
+      results.innerHTML = `<p style="color:#ff6b6b">Erreur API: ${err.message}</p>`;
+    }
   }
+
+  // ========== BOUTONS ==========
+  btnApply.onclick = loadStats;
+
+  btnToday.onclick = () => {
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    fromInput.value = toInputLocal(start);
+    untilInput.value = toInputLocal(new Date());
+    loadStats();
+  };
+
+  btn7.onclick = () => {
+    fromInput.value = toInputLocal(new Date(Date.now() - 7 * 86400000));
+    untilInput.value = toInputLocal(new Date());
+    loadStats();
+  };
+
+  btn30.onclick = () => {
+    fromInput.value = toInputLocal(new Date(Date.now() - 30 * 86400000));
+    untilInput.value = toInputLocal(new Date());
+    loadStats();
+  };
+
+  // Vue manager avec la même période
+  btnManager.onclick = () => {
+    const fromVal = fromInput.value;
+    const untilVal = untilInput.value;
+    showManagerAcStats(fromVal, untilVal);
+  };
+
+  loadStats();
 }
+
+
+
+async function showManagerAcStats(fromValue, untilValue) {
+  if (!state.api || !state.groups) {
+    alert('Impossible de charger les stats manager : state.api ou state.groups est manquant.');
+    return;
+  }
+  const api = state.api;
+
+  const toInputLocal = (date) => {
+    const d = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+    return d.toISOString().slice(0, 16);
+  };
+
+  const now = new Date();
+  let defaultUntil = now;
+  let defaultFrom = new Date(now.getTime() - 7 * 86400000);
+
+  if (fromValue) defaultFrom = new Date(fromValue);
+  if (untilValue) defaultUntil = new Date(untilValue);
+
+  const wrapper = document.createElement('div');
+  wrapper.className = 'stats-modal enhanced-acd-stats';
+
+  const filter = document.createElement('div');
+  filter.className = 'stats-filter';
+
+  const labelPeriod = document.createElement('div');
+  labelPeriod.className = 'stats-filter__label';
+  labelPeriod.textContent = 'Période';
+
+  const fromGroup = document.createElement('div');
+  fromGroup.className = 'stats-filter__field';
+  const fromLabel = document.createElement('span');
+  fromLabel.textContent = 'Du';
+  const fromInput = document.createElement('input');
+  fromInput.type = 'datetime-local';
+  fromInput.value = toInputLocal(defaultFrom);
+  fromGroup.append(fromLabel, fromInput);
+
+  const untilGroup = document.createElement('div');
+  untilGroup.className = 'stats-filter__field';
+  const untilLabel = document.createElement('span');
+  untilLabel.textContent = 'Au';
+  const untilInput = document.createElement('input');
+  untilInput.type = 'datetime-local';
+  untilInput.value = toInputLocal(defaultUntil);
+  untilGroup.append(untilLabel, untilInput);
+
+  const btnApply = document.createElement('button');
+  btnApply.className = 'btn btn--primary btn--sm';
+  btnApply.textContent = 'Afficher';
+
+  const btnToday = document.createElement('button');
+  btnToday.className = 'btn btn--secondary btn--sm';
+  btnToday.textContent = 'Aujourd’hui';
+
+  const btn7 = document.createElement('button');
+  btn7.className = 'btn btn--secondary btn--sm';
+  btn7.textContent = '7 jours';
+
+  const btn30 = document.createElement('button');
+  btn30.className = 'btn btn--secondary btn--sm';
+  btn30.textContent = '30 jours';
+
+  const presets = document.createElement('div');
+  presets.className = 'stats-filter__presets';
+  presets.append(btnApply, btnToday, btn7, btn30);
+
+  filter.append(labelPeriod, fromGroup, untilGroup, presets);
+
+  const results = document.createElement('div');
+  results.className = 'stats-results';
+  results.innerHTML = '<p>Chargement…</p>';
+
+  wrapper.append(filter, results);
+  openSupervisorModal('Stats ACD – Vue manager', wrapper);
+
+  const fmt = (sec) => {
+    sec = Math.floor(sec || 0);
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = sec % 60;
+    return `${h}h${m.toString().padStart(2, '0')}m${s.toString().padStart(2, '0')}s`;
+  };
+
+  const agentsMap = new Map();
+  for (const agents of state.groups.values()) {
+    for (const a of agents) {
+      if (!a.id) continue;
+      if (!agentsMap.has(a.id)) {
+        agentsMap.set(a.id, a);
+      }
+    }
+  }
+  const agentsList = Array.from(agentsMap.values());
+
+  async function loadManagerStats() {
+    const fromIso = new Date(fromInput.value).toISOString();
+    const untilIso = new Date(untilInput.value).toISOString();
+
+    try {
+      const statsList = await Promise.all(
+        agentsList.map(async (ag) => {
+          const path =
+            `/api/call-logd/1.0/agents/${ag.id}/statistics` +
+            `?from=${encodeURIComponent(fromIso)}` +
+            `&until=${encodeURIComponent(untilIso)}`;
+
+          const res = await api(path);
+          const items = res && Array.isArray(res.items) ? res.items : [];
+          const agg = items.length ? items[items.length - 1] : (res || {});
+
+          const getNum = (...keys) => {
+            for (const k of keys) {
+              if (agg && agg[k] != null) return Number(agg[k]) || 0;
+            }
+            return 0;
+          };
+
+          const acdCalls    = getNum('call_count',     'acd_call_count');
+          const acdAnswered = getNum('answered_count', 'acd_answered_count');
+          const acdMissed   = getNum('missed_count',   'acd_missed_count');
+          const acdTalk     = getNum('conversation_time', 'acd_talking_duration');
+          const acdLogin    = getNum('login_time',        'acd_login_duration');
+          const acdPause    = getNum('pause_time',        'acd_pause_duration');
+
+          const talkRate = acdLogin > 0 ? Math.round((acdTalk / acdLogin) * 100) : 0;
+
+          return {
+            agent: ag,
+            acdCalls,
+            acdAnswered,
+            acdMissed,
+            acdTalk,
+            acdLogin,
+            acdPause,
+            talkRate,
+          };
+        })
+      );
+
+      statsList.sort((a, b) => b.acdAnswered - a.acdAnswered);
+
+      const totalCalls   = statsList.reduce((s, x) => s + x.acdCalls, 0);
+      const totalAnswered= statsList.reduce((s, x) => s + x.acdAnswered, 0);
+      const totalMissed  = statsList.reduce((s, x) => s + x.acdMissed, 0);
+      const totalTalk    = statsList.reduce((s, x) => s + x.acdTalk, 0);
+      const totalLogin   = statsList.reduce((s, x) => s + x.acdLogin, 0);
+      const globalReplyRate = totalCalls > 0 ? Math.round(totalAnswered / totalCalls * 100) : 0;
+
+      let rowsHtml = '';
+      for (const item of statsList) {
+        const a = item.agent;
+        const name = a.name || `Agent ${a.id}`;
+        const ext  = a.extension || a.number || '—';
+        const replyRate = item.acdCalls > 0
+          ? Math.round(item.acdAnswered / item.acdCalls * 100)
+          : 0;
+
+        rowsHtml += `
+          <tr>
+            <td>${name}</td>
+            <td>${ext}</td>
+            <td>${item.acdCalls}</td>
+            <td>${item.acdAnswered}</td>
+            <td>${item.acdMissed}</td>
+            <td>${fmt(item.acdTalk)}</td>
+            <td>${fmt(item.acdLogin)}</td>
+            <td>
+              <div class="mini-bar">
+                <div class="mini-bar__fill" style="width:${replyRate}%"></div>
+              </div>
+              <span class="mini-bar__value">${replyRate}%</span>
+            </td>
+          </tr>
+        `;
+      }
+
+      results.innerHTML = `
+        <section class="kpi-block">
+          <div class="kpi-title">Résumé équipe ACD</div>
+          <div class="kpi-grid kpi-grid--wide">
+            <div class="kpi-item"><span>Agents</span><strong>${statsList.length}</strong></div>
+            <div class="kpi-item"><span>Appels totaux</span><strong>${totalCalls}</strong></div>
+            <div class="kpi-item"><span>Répondus</span><strong>${totalAnswered}</strong></div>
+            <div class="kpi-item"><span>Manqués</span><strong>${totalMissed}</strong></div>
+            <div class="kpi-item"><span>Temps de com</span><strong>${fmt(totalTalk)}</strong></div>
+            <div class="kpi-item"><span>Temps logué</span><strong>${fmt(totalLogin)}</strong></div>
+            <div class="kpi-item"><span>Taux de réponse global</span><strong>${globalReplyRate}%</strong></div>
+          </div>
+        </section>
+
+        <section class="kpi-block">
+          <div class="kpi-title">Classement des agents</div>
+          <table class="manager-table">
+            <thead>
+              <tr>
+                <th>Agent</th>
+                <th>Ext.</th>
+                <th>Appels ACD</th>
+                <th>Répondus</th>
+                <th>Manqués</th>
+                <th>Temps en com</th>
+                <th>Temps logué</th>
+                <th>Taux réponse</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rowsHtml}
+            </tbody>
+          </table>
+        </section>
+      `;
+    } catch (err) {
+      console.error('[Superviseur] Erreur showManagerAcStats', err);
+      results.innerHTML = `<p style="color:#ff6b6b">Erreur API: ${err.message}</p>`;
+    }
+  }
+
+  btnApply.onclick = loadManagerStats;
+  btnToday.onclick = () => {
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    fromInput.value = toInputLocal(start);
+    untilInput.value = toInputLocal(new Date());
+    loadManagerStats();
+  };
+  btn7.onclick = () => {
+    fromInput.value = toInputLocal(new Date(Date.now() - 7 * 86400000));
+    untilInput.value = toInputLocal(new Date());
+    loadManagerStats();
+  };
+  btn30.onclick = () => {
+    fromInput.value = toInputLocal(new Date(Date.now() - 30 * 86400000));
+    untilInput.value = toInputLocal(new Date());
+    loadManagerStats();
+  };
+
+  loadManagerStats();
+}
+
+
+
 
 
 // -------------------------------------------------------------------
