@@ -278,6 +278,298 @@ function queueColorFromName(name) {
   return `hsl(${hue}, 65%, 55%)`;
 }
 
+function openSupervisorModal(title, bodyContent) {
+  // Ferme un éventuel popup existant
+  const existing = document.querySelector('.supervisor-modal-backdrop');
+  if (existing) existing.remove();
+
+  const backdrop = document.createElement('div');
+  backdrop.className = 'supervisor-modal-backdrop';
+
+  const modal = document.createElement('div');
+  modal.className = 'supervisor-modal';
+
+  const header = document.createElement('div');
+  header.className = 'supervisor-modal__header';
+
+  const h = document.createElement('h3');
+  h.className = 'supervisor-modal__title';
+  h.textContent = title;
+
+  const closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  closeBtn.className = 'supervisor-modal__close';
+  closeBtn.textContent = '×';
+
+  closeBtn.addEventListener('click', () => backdrop.remove());
+  backdrop.addEventListener('click', (e) => {
+    if (e.target === backdrop) backdrop.remove();
+  });
+
+  header.appendChild(h);
+  header.appendChild(closeBtn);
+
+  const content = document.createElement('div');
+  content.className = 'supervisor-modal__content';
+
+  if (typeof bodyContent === 'string') {
+    content.innerHTML = bodyContent;
+  } else if (bodyContent instanceof Node) {
+    content.appendChild(bodyContent);
+  }
+
+  modal.appendChild(header);
+  modal.appendChild(content);
+  backdrop.appendChild(modal);
+  document.body.appendChild(backdrop);
+}
+
+
+async function showAgentHistory(agent) {
+  if (!agent || !agent.userUuid) {
+    alert("Impossible de récupérer l'historique : userUuid manquant.");
+    return;
+  }
+  if (!state.api) {
+    alert('API non initialisée.');
+    return;
+  }
+
+  const api = state.api;
+
+  // 📅 7 derniers jours glissants
+  const now = new Date();
+  const until = now.toISOString();
+  const fromDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+  const from = fromDate.toISOString();
+
+  const path =
+    `/api/call-logd/1.0/users/${encodeURIComponent(agent.userUuid)}/cdr` +
+    `?from=${encodeURIComponent(from)}` +
+    `&until=${encodeURIComponent(until)}` +
+    `&limit=100` +
+    `&direction=desc` +
+    `&order=start`;
+
+  try {
+    setStatus(`Chargement de l'historique pour ${agent.name}…`, 'info');
+    console.log('[Superviseur] Historique (7j) ->', path);
+
+    const res = await api(path, { method: 'GET' });
+
+    const list = Array.isArray(res)
+      ? res
+      : res.items || res.calls || res.cdr || [];
+
+    if (!list.length) {
+      openSupervisorModal(
+        `Historique – ${agent.name}`,
+        'Aucun appel sur les 7 derniers jours.'
+      );
+      setStatus('Historique vide.', 'success');
+      return;
+    }
+
+    // Phonebook prêt (no-op si déjà fait)
+    try {
+      await ensurePhonebookIndex();
+    } catch (e) {
+      console.warn('[Superviseur] Phonebook indisponible', e);
+    }
+
+    const table = document.createElement('table');
+    table.className = 'supervisor-modal-table';
+
+    const thead = document.createElement('thead');
+    thead.innerHTML = `
+      <tr>
+        <th>Date</th>
+        <th>Direction</th>
+        <th>Correspondant</th>
+        <th>Statut</th>
+        <th>Durée</th>
+      </tr>
+    `;
+    table.appendChild(thead);
+
+    const tbody = document.createElement('tbody');
+    const pickFirst = (...vals) => {
+      for (const v of vals) {
+        if (v != null && String(v).trim() !== '') {
+          return String(v).trim();
+        }
+      }
+      return null;
+    };
+
+    list.slice(0, 100).forEach((cdr) => {
+      const tr = document.createElement('tr');
+
+      // --- Date / heure ---
+      const start =
+        cdr.start ||
+        cdr.started_at ||
+        cdr.start_time ||
+        cdr.timestamp ||
+        cdr.date;
+      const d = start ? new Date(start) : null;
+      const dateLabel = d
+        ? d.toLocaleString('fr-FR', {
+            day: '2-digit',
+            month: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+          })
+        : '??';
+
+      // --- Direction ---
+      const dirRaw = (cdr.call_direction || cdr.direction || '').toLowerCase();
+      let directionLabel = 'interne';
+      let isInbound = false;
+      let isOutbound = false;
+      if (dirRaw.includes('in')) {
+        directionLabel = 'entrant';
+        isInbound = true;
+      } else if (dirRaw.includes('out')) {
+        directionLabel = 'sortant';
+        isOutbound = true;
+      }
+
+      // =============================
+      // 🔎 Numéro à garder = "entre parenthèses"
+      // → on privilégie les champs de destination / extension
+      // =============================
+      let rawNumber = null;
+      if (isOutbound) {
+        // Sortant : d'abord le numéro réellement appelé (DID / extension),
+        // ensuite seulement les remote_* / caller_id
+        rawNumber = pickFirst(
+          cdr.requested_extension,
+          cdr.destination_extension,
+          cdr.destination_internal_extension,
+          cdr.other_party_number,
+          cdr.remote_callee_id_number,
+          cdr.callee_id_number
+        );
+      } else if (isInbound) {
+        // Entrant : numéro de la personne qui appelle
+        rawNumber = pickFirst(
+          cdr.remote_caller_id_number,
+          cdr.caller_id_number,
+          cdr.other_party_number,
+          cdr.source_extension,
+          cdr.requested_extension,
+          cdr.exten
+        );
+      } else {
+        // Interne ou non déterminé
+        rawNumber = pickFirst(
+          cdr.other_party_number,
+          cdr.remote_caller_id_number,
+          cdr.remote_callee_id_number,
+          cdr.caller_id_number,
+          cdr.callee_id_number,
+          cdr.destination_extension,
+          cdr.source_extension,
+          cdr.requested_extension,
+          cdr.exten
+        );
+      }
+
+      const normalizedNumber = rawNumber ? normalizePhone(rawNumber) : '';
+
+      // --- Nom depuis le CDR (destination_details, requested_name, etc.) ---
+      let destDetails = null;
+      if (Array.isArray(cdr.destination_details) && cdr.destination_details.length) {
+        destDetails = cdr.destination_details[0];
+      } else if (
+        cdr.destination_details &&
+        typeof cdr.destination_details === 'object'
+      ) {
+        destDetails = cdr.destination_details;
+      }
+
+      const nameCandidates = [
+        destDetails && destDetails.name,
+        cdr.requested_name,
+        cdr.destination_name,
+        cdr.source_name,
+        cdr.destination_internal_name,
+        cdr.source_internal_name,
+      ];
+      let name = pickFirst(...nameCandidates);
+
+      // --- Nom via annuaire / interne ---
+      let directoryLabel = '';
+      if (rawNumber) {
+        const tmp = resolveNumberLabel(rawNumber); // nom ou numéro
+        if (tmp) {
+          directoryLabel = tmp;
+        }
+      }
+
+      // 🧠 Ici on laisse l'annuaire PRENDRE LE DESSUS sur le nom brut
+      if (directoryLabel && directoryLabel !== rawNumber && directoryLabel !== normalizedNumber) {
+        name = directoryLabel;
+      }
+
+      let otherLabel = '—';
+      if (name && normalizedNumber) {
+        otherLabel = `${name} (${normalizedNumber})`;
+      } else if (name) {
+        otherLabel = name;
+      } else if (normalizedNumber) {
+        otherLabel = normalizedNumber;
+      }
+
+      // --- Répondu / manqué ---
+      const answered =
+        cdr.answered === true ||
+        cdr.answered_at ||
+        (cdr.disposition &&
+          String(cdr.disposition).toLowerCase() === 'answered') ||
+        (cdr.call_status &&
+          String(cdr.call_status).toLowerCase() === 'answered');
+
+      const statutLabel = answered ? 'répondu' : 'manqué';
+
+      // --- Durée ---
+      const duree =
+        cdr.duration || cdr.billsec || cdr.talking_duration || 0;
+      const min = Math.floor(duree / 60);
+      const sec = duree % 60;
+      const durLabel =
+        duree > 0 ? `${min}m${sec.toString().padStart(2, '0')}s` : '--';
+
+      tr.innerHTML = `
+        <td>${dateLabel}</td>
+        <td>${directionLabel}</td>
+        <td>${otherLabel}</td>
+        <td>${statutLabel}</td>
+        <td>${durLabel}</td>
+      `;
+      tbody.appendChild(tr);
+    });
+
+    table.appendChild(tbody);
+    openSupervisorModal(`Historique (7 jours) – ${agent.name}`, table);
+    setStatus('Historique chargé.', 'success');
+  } catch (err) {
+    console.error('[Superviseur] Erreur showAgentHistory', err);
+    setStatus("Erreur lors du chargement de l'historique.", 'error');
+    openSupervisorModal(
+      `Historique – ${agent.name}`,
+      `Impossible de charger l’historique.\n${err && err.message ? err.message : 'Erreur API call-logd'}`
+    );
+  }
+}
+
+
+
+
+
+
+
 // -------------------------------------------------------------------
 // Normalisation / mapping
 // -------------------------------------------------------------------
@@ -996,7 +1288,7 @@ function buildCallChipHtml(callInfo) {
 
 // === Actions "superviseur" par agent ==================================
 
-function callAgentFromSupervisor(agent, api) {
+async function callAgentFromSupervisor(agent, api) {
   const ext = agent.extension || agent.number;
   if (!ext) {
     alert(
@@ -1005,50 +1297,305 @@ function callAgentFromSupervisor(agent, api) {
     return;
   }
 
-  setStatus(`Appel de ${agent.name} (${ext})…`, 'info');
+  const number = String(ext);
+  console.log('[Superviseur] Appel agent via SDK, numéro =', number, agent);
+  setStatus(`Appel de ${agent.name} (${number})…`, 'info');
 
-  api('/api/calld/1.0/users/me/calls', {
-    method: 'POST',
-    body: { extension: String(ext) },
-  })
-    .then(() => {
+  try {
+    // 🔹 1) Chemin “propre” : SDK E-UC
+    if (state.app && typeof state.app.startCall === 'function') {
+      await state.app.startCall({
+        targets: [number],
+        requestedModalities: ['audio'],
+      });
       setStatus('Appel lancé.', 'success');
-    })
-    .catch((err) => {
-      console.error('[Superviseur] Erreur callAgentFromSupervisor', err);
-      alert(
-        `Erreur lors de l’appel de cet agent.\n` + (err.message || '')
-      );
-      setStatus('Erreur lors de l’appel.', 'error');
+      return;
+    }
+
+    // 🔹 2) Fallback : ancien appel direct API (au cas où)
+    console.warn(
+      '[Superviseur] app.startCall indisponible, fallback via /users/me/calls'
+    );
+    await api('/api/calld/1.0/users/me/calls', {
+      method: 'POST',
+      body: { extension: number },
     });
+    setStatus('Appel lancé (fallback).', 'success');
+  } catch (err) {
+    console.error('[Superviseur] Erreur callAgentFromSupervisor', err);
+    alert(
+      `Erreur lors de l’appel de cet agent.\n` + (err.message || '')
+    );
+    setStatus('Erreur lors de l’appel.', 'error');
+  }
 }
 
-function showAgentHistory(agent) {
-  // TODO : ouvrir un panneau avec l’historique call-logd filtré sur cet agent
-  console.log('[Superviseur] Historique agent', agent);
-  alert(
-    `Ici on affichera l’historique des appels pour :\n\n` +
-      `${agent.name || 'Agent sans nom'}`
-  );
+
+
+
+
+// -------------------------------------------------------------------
+// CDR / Historique / Stats / Enregistrements par agent
+// -------------------------------------------------------------------
+
+async function fetchAgentCdr(agent, { days = 7, limit = 50 } = {}) {
+  if (!agent || !agent.userUuid) {
+    alert(
+      `Impossible de récupérer les CDR : userUuid manquant pour ${agent ? agent.name : 'agent inconnu'}.`
+    );
+    return [];
+  }
+  if (!state.api) {
+    alert('API non initialisée, impossible de charger les CDR.');
+    return [];
+  }
+
+  const api = state.api;
+  const now = new Date();
+  const from = new Date(now.getTime() - days * 24 * 60 * 60 * 1000).toISOString();
+
+  // On essaye plusieurs endpoints possibles selon la version
+  const paths = [
+    `/api/call-logd/1.0/users/${encodeURIComponent(
+      agent.userUuid
+    )}/cdr?limit=${limit}&order=desc&from=${encodeURIComponent(from)}`,
+    `/api/call-logd/1.0/users/me/cdr?user_uuid=${encodeURIComponent(
+      agent.userUuid
+    )}&limit=${limit}&order=desc&from=${encodeURIComponent(from)}`,
+  ];
+
+  for (const path of paths) {
+    try {
+      console.log('[Superviseur] Chargement CDR agent via', path);
+      const res = await api(path, { method: 'GET' });
+
+      const list = Array.isArray(res)
+        ? res
+        : res.items || res.calls || res.cdr || [];
+
+      if (list.length) return list;
+    } catch (err) {
+      console.warn('[Superviseur] Impossible de récupérer CDR via', path, err);
+      // on tente le path suivant
+    }
+  }
+
+  return [];
 }
 
-function showAgentStats(agent) {
-  // TODO : ouvrir un panneau avec les stats ACD de cet agent
-  console.log('[Superviseur] Stats agent', agent);
-  alert(
-    `Ici on affichera les statistiques ACD pour :\n\n` +
-      `${agent.name || 'Agent sans nom'}`
-  );
+// Historique des derniers appels
+async function showAgentStats(agent) {
+  if (!agent || agent.id == null || !agent.userUuid) {
+    alert("Impossible de récupérer les stats : id agent ou userUuid manquant.");
+    return;
+  }
+  if (!state.api) {
+    alert('API non initialisée.');
+    return;
+  }
+
+  const api = state.api;
+
+  // 📅 7 derniers jours glissants
+  const now = new Date();
+  const until = now.toISOString();
+  const fromDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+  const from = fromDate.toISOString();
+
+const cdrPath =
+  `/api/call-logd/1.0/users/${encodeURIComponent(agent.userUuid)}/cdr` +
+  `?from=${encodeURIComponent(from)}` +
+  `&until=${encodeURIComponent(until)}` +
+  `&limit=1000` +
+  `&direction=desc` +    // ✅ sens du tri
+  `&order=start`;
+
+
+  const statsPath =
+    `/api/call-logd/1.0/agents/${encodeURIComponent(
+      String(agent.id)
+    )}/statistics` +
+    `?from=${encodeURIComponent(from)}` +
+    `&until=${encodeURIComponent(until)}`;
+
+  try {
+    setStatus(`Chargement des stats pour ${agent.name}…`, 'info');
+    console.log('[Superviseur] Stats agent (7j) ->', statsPath);
+    console.log('[Superviseur] Stats CDR user (7j) ->', cdrPath);
+
+    const [cdrRes, statsRes] = await Promise.all([
+      api(cdrPath, { method: 'GET' }),
+      api(statsPath, { method: 'GET' }),
+    ]);
+
+    // ---------- 1) Statistiques à partir des CDR ----------
+    const cdrList = Array.isArray(cdrRes)
+      ? cdrRes
+      : cdrRes.items || cdrRes.calls || cdrRes.cdr || [];
+
+    let totalCalls = 0;
+    let answeredCount = 0;
+    let missedCount = 0;
+    let convSecondsCdr = 0;
+
+    for (const cdr of cdrList) {
+      totalCalls += 1;
+
+      const answered =
+        cdr.answered === true ||
+        cdr.answered_at ||
+        (cdr.disposition &&
+          String(cdr.disposition).toLowerCase() === 'answered') ||
+        (cdr.call_status &&
+          String(cdr.call_status).toLowerCase() === 'answered');
+
+      if (answered) answeredCount += 1;
+
+      const dur = cdr.duration || cdr.billsec || cdr.talking_duration || 0;
+      convSecondsCdr += dur;
+    }
+
+    missedCount = Math.max(0, totalCalls - answeredCount);
+
+    // ---------- 2) Statistiques ACD (login/pause/etc.) ----------
+    const items = (statsRes && (statsRes.items || statsRes.statistics)) || [];
+    let agg = null;
+    if (items.length) {
+      agg = items[items.length - 1]; // dernier = agrégat de la période
+    }
+
+    const convSecondsAcd = (agg && agg.conversation_time) || 0;
+    const pauseSeconds = (agg && agg.pause_time) || 0;
+    const loginSeconds = (agg && agg.login_time) || 0;
+    const wrapupSeconds = (agg && agg.wrapup_time) || 0;
+
+    const fmt = (seconds) => {
+      const s = Math.max(0, Math.floor(seconds || 0));
+      const h = Math.floor(s / 3600);
+      const m = Math.floor((s % 3600) / 60);
+      const sec = s % 60;
+      if (h > 0) {
+        return `${h}h${String(m).padStart(2, '0')}m${String(sec).padStart(2, '0')}s`;
+      }
+      return `${m}m${String(sec).padStart(2, '0')}s`;
+    };
+
+    const body = document.createElement('div');
+    body.innerHTML = `
+      <p><strong>Période :</strong> 7 derniers jours</p>
+      <p><strong>Total appels (CDR utilisateur) :</strong> ${totalCalls}</p>
+      <p><strong>Répondus :</strong> ${answeredCount}</p>
+      <p><strong>Manqués :</strong> ${missedCount}</p>
+      <p><strong>Temps de conversation (CDR) :</strong> ${fmt(convSecondsCdr)}</p>
+      <hr>
+      <p><strong>Temps de conversation ACD :</strong> ${fmt(convSecondsAcd)}</p>
+      <p><strong>Temps connecté (login ACD) :</strong> ${fmt(loginSeconds)}</p>
+      <p><strong>Temps en pause ACD :</strong> ${fmt(pauseSeconds)}</p>
+      <p><strong>Temps post-appel (wrapup) :</strong> ${fmt(wrapupSeconds)}</p>
+    `;
+
+    openSupervisorModal(`Stats (7 jours) – ${agent.name}`, body);
+    setStatus('Stats agent chargées.', 'success');
+  } catch (err) {
+    console.error('[Superviseur] Erreur showAgentStats', err);
+    setStatus('Erreur lors du chargement des stats.', 'error');
+    openSupervisorModal(
+      `Stats – ${agent.name}`,
+      `Impossible de charger les stats.\n${err && err.message ? err.message : 'Erreur API call-logd'}`
+    );
+  }
 }
 
-function toggleAgentRecording(agent) {
-  // TODO : il faudra lier ça à un callId précis si Wazo E-UC expose l’API
-  console.log('[Superviseur] Enregistrement agent (TODO)', agent);
-  alert(
-    `Ici on pilotera l’enregistrement / stop enregistrement\n` +
-      `pour l’appel en cours de : ${agent.name || 'Agent'}.`
-  );
+
+// -------------------------------------------------------------------
+// Start / Stop enregistrement sur l'appel EN COURS de l'agent
+// Utilise calld : /calls/{call_id}/record/start|stop (PUT)
+// Doc : wazo-calld.yml (/calls/{call_id}/record/start/stop)
+// -------------------------------------------------------------------
+async function toggleAgentRecording(agent, button) {
+  if (!agent) return;
+
+  const api = state.api;
+  if (!api) {
+    alert("API non initialisée, impossible de piloter l'enregistrement.");
+    return;
+  }
+
+  // Récupérer l'appel en cours pour cet agent
+  const callsByUser =
+    (state.callsByUser instanceof Map && state.callsByUser) || new Map();
+
+  const callInfo =
+    agent.userUuid && callsByUser.has(agent.userUuid)
+      ? callsByUser.get(agent.userUuid)
+      : null;
+
+  if (!callInfo || !callInfo.callId) {
+    alert(
+      `Aucun appel en cours détecté pour ${agent.name || 'cet agent'}.\n` +
+        "L'enregistrement ne peut se faire que sur un appel actif."
+    );
+    return;
+  }
+
+  const callId = String(callInfo.callId);
+
+  // État actuel du bouton (on garde ça côté UI)
+  const isRecording = button && button.dataset.recording === 'on';
+
+  const path = isRecording
+    ? `/api/calld/1.0/calls/${encodeURIComponent(callId)}/record/stop`
+    : `/api/calld/1.0/calls/${encodeURIComponent(callId)}/record/start`;
+
+  const actionLabel = isRecording ? 'Arrêt' : 'Démarrage';
+
+  try {
+    setStatus(
+      `${actionLabel} de l'enregistrement pour ${agent.name || 'agent'}…`,
+      'info'
+    );
+
+    console.log('[Superviseur] Recording toggle', {
+      agent,
+      callId,
+      isRecording,
+      path,
+    });
+
+    await api(path, { method: 'PUT' });
+
+    // Mise à jour de l’UI
+    if (button) {
+      const newState = !isRecording;
+      button.dataset.recording = newState ? 'on' : 'off';
+      button.textContent = newState ? 'Stop Rec' : 'Rec';
+
+      button.classList.remove('btn--danger', 'btn--secondary');
+      if (newState) {
+        button.classList.add('btn--danger');
+      } else {
+        button.classList.add('btn--secondary');
+      }
+    }
+
+    setStatus(
+      `Enregistrement ${isRecording ? 'arrêté' : 'démarré'} pour ${
+        agent.name || 'agent'
+      }.`,
+      'success'
+    );
+  } catch (err) {
+    console.error('[Superviseur] Erreur toggleAgentRecording', err);
+    setStatus("Erreur lors du pilotage de l'enregistrement.", 'error');
+    alert(
+      `Erreur lors du pilotage de l'enregistrement pour ${
+        agent.name || 'agent'
+      }.\n` + (err && err.message ? err.message : '')
+    );
+  }
 }
+
+
 
 function showAgentDetails(agent) {
   const lines = [];
@@ -1072,12 +1619,16 @@ function showAgentDetails(agent) {
 // Supervision et transfert mobile
 // -------------------------------------------------------------------
 
+// -------------------------------------------------------------------
+// Supervision (join / spy / whisper) via SDK E-UC + fallback API
+// -------------------------------------------------------------------
 async function superviseAgentCall(mode, agent, api) {
   const prefix = SUPERVISION_PREFIXES[mode];
   if (!prefix) {
     alert(`Préfixe supervision non configuré pour le mode ${mode}.`);
     return;
   }
+
   const ext = agent.extension || agent.number;
   if (!ext) {
     alert(
@@ -1087,26 +1638,51 @@ async function superviseAgentCall(mode, agent, api) {
   }
 
   const target = `${prefix}${ext}`;
+  const label =
+    mode === 'join' ? 'Join' : mode === 'spy' ? 'Spy' : 'Whisper';
+
   try {
-    const label =
-      mode === 'join' ? 'Join' : mode === 'spy' ? 'Spy' : 'Whisper';
     setStatus(`${label} sur ${agent.name} (${ext})…`, 'info');
+
+    // 1) Chemin “propre” : SDK Wazo E-UC
+    if (state.app && typeof state.app.startCall === 'function') {
+      console.log(
+        '[Superviseur] Supervision via SDK',
+        mode,
+        'target =',
+        target
+      );
+
+      await state.app.startCall({
+        targets: [target],
+        requestedModalities: ['audio'],
+      });
+
+      setStatus(`${label} lancé.`, 'success');
+      return;
+    }
+
+    // 2) Fallback : ancien appel direct API (au cas où)
+    console.warn(
+      '[Superviseur] app.startCall indisponible, fallback via /users/me/calls'
+    );
 
     await api('/api/calld/1.0/users/me/calls', {
       method: 'POST',
-      body: { extension: target },
+      body: { extension: target }, // ⚠️ bien "extension", pas "number"
     });
 
-    setStatus('Commande de supervision envoyée.', 'success');
+    setStatus(`${label} lancé (fallback).`, 'success');
   } catch (err) {
     console.error('[Superviseur] Erreur superviseAgentCall', err);
     alert(
-      `Erreur lors de la supervision (${mode}) de cet agent.\n` +
+      `Erreur lors du ${label.toLowerCase()} sur cet agent.\n` +
         (err.message || '')
     );
-    setStatus('Erreur lors de la supervision.', 'error');
+    setStatus('Erreur supervision.', 'error');
   }
 }
+
 
 // TRANSFERT MOBILE (renvoi inconditionnel correct via confd)
 async function setUserMobileForward(userUuid, number, api) {
@@ -1132,6 +1708,7 @@ async function setUserMobileForward(userUuid, number, api) {
     }
   );
 }
+
 
 function syncAllForwardControlsForUser(userUuid, forwardEnabled, forwardNumber) {
   if (!userUuid || !containerEl) return;
@@ -1270,17 +1847,51 @@ const getUserUuidFromRow = () => {
     // 🔁 met à jour tous les boutons NPD de ce user
     syncAllDndButtonsForUser(userUuid, targetState);
 
-    // 🔄 met à jour sa disponibilité dans toutes les files
-    const realAgent = [...state.groups.values()]
-  .flat()
-  .find(a => a.id === agent.id || a.userUuid === userUuid);
+    // 🔄 met à jour uniquement le statut visuel de la ligne courante
+    const row = btn.closest('tr');
+    if (row) {
+      const statusTd = row.querySelector('.col-status');
+      let statusInfo;
+      const card = row.closest('.queue-card');
+      const isParkingRow =
+        card && card.classList.contains('queue-card--parking');
 
-if (realAgent) {
-  // On met à jour uniquement DND
-  syncAgentDom(realAgent);
-}
+      if (isParkingRow && userUuid) {
+        const sessionsMap     = state.userSessions     || new Map();
+        const dndMap          = state.userDnd          || new Map();
+        const availabilityMap = state.userAvailability || new Map();
+        const callsByUser     = state.callsByUser      || new Map();
+
+        const hasSession  = sessionsMap.get(userUuid) === true;
+        const dndEnabled2 = dndMap.get(userUuid) === true;
+        const hasPresence = availabilityMap.has(userUuid);
+        const hasCall     = callsByUser.has(userUuid);
+
+        if (!hasSession) {
+          statusInfo = { text: 'Non connecté', css: 'pill--offline' };
+        } else if (dndEnabled2) {
+          statusInfo = { text: 'Ne pas déranger', css: 'pill--dnd' };
+        } else if (hasCall) {
+          statusInfo = { text: 'En appel', css: 'pill--oncall' };
+        } else if (hasPresence) {
+          const raw = availabilityMap.get(userUuid);
+          statusInfo = getAvailabilityPill(raw);
+        } else {
+          statusInfo = { text: 'Disponible', css: 'pill--available' };
+        }
+      } else {
+        // File ACD classique → on garde la logique d'origine
+        statusInfo = getStatusInfo(agent);
+      }
+
+      if (statusTd && statusInfo) {
+        statusTd.innerHTML =
+          `<span class="pill ${statusInfo.css}">${statusInfo.text}</span>`;
+      }
+    }
 
     setStatus('DND mis à jour.', 'success');
+
   } catch (err) {
     console.error('[Superviseur] Erreur DND', err);
     setStatus('Erreur lors de la mise à jour du DND.', 'error');
@@ -1680,7 +2291,9 @@ async function buildCallsByUserMap_EUC(callsRaw, api, previousMapFromCaller) {
       rawNumber: number,
       direction: data.direction === 'inbound' ? 'inbound' : 'outbound',
       startedAt: startedAtMs,
+      callId, // 👈 nécessaire pour /calls/{call_id}/record/...
     });
+
   }
 
   // Nettoyage : on supprime du localStorage les appels qui ne sont plus actifs
@@ -2442,12 +3055,12 @@ if (transferCell) {
 
 if (!isParking) {
   // === BOUTONS SUPERVISEUR (NOUVEAUX + SPY conservé) ===
-  const callBtn   = createActionButton('Appeler', 'secondary');
-  const spyBtn    = createActionButton('Spy', 'secondary');         // 🔥 KEEP SPY
-  const histBtn   = createActionButton('Historique', 'secondary');
-  const statsBtn  = createActionButton('Stats agent', 'secondary');
-  const recBtn    = createActionButton('Enregistrer', 'secondary');
-  const detailBtn = createActionButton('Détail', 'secondary');
+  const callBtn  = createActionButton('Appeler', 'secondary');
+  const spyBtn   = createActionButton('Spy', 'secondary');         // 🔥 KEEP SPY
+  const histBtn  = createActionButton('Historique', 'secondary');
+  const statsBtn = createActionButton('Stats agent', 'secondary');
+const recBtn   = createActionButton('Rec', 'secondary');
+  recBtn.dataset.recording = 'off';
 
   const supervisionButtons = [
     callBtn,
@@ -2455,8 +3068,8 @@ if (!isParking) {
     histBtn,
     statsBtn,
     recBtn,
-    detailBtn
   ];
+
 
   supervisionButtons.forEach((btn) => {
     btn.classList.add('btn-supervision');
@@ -2475,16 +3088,18 @@ if (!isParking) {
 
   histBtn.addEventListener('click', () => showAgentHistory(agent));
   statsBtn.addEventListener('click', () => showAgentStats(agent));
-  recBtn.addEventListener('click', () => toggleAgentRecording(agent));
-  detailBtn.addEventListener('click', () => showAgentDetails(agent));
+  recBtn.addEventListener('click', (ev) =>
+    toggleAgentRecording(agent, ev.currentTarget)
+  );
+
 
   // Injection dans la cellule supervision
   supervisionCell.appendChild(callBtn);
-  supervisionCell.appendChild(spyBtn);      // 🔥 IMPORTANT — SPIY est ici
+  supervisionCell.appendChild(spyBtn);      // 🔥 IMPORTANT — SPY est ici
   supervisionCell.appendChild(histBtn);
   supervisionCell.appendChild(statsBtn);
   supervisionCell.appendChild(recBtn);
-  supervisionCell.appendChild(detailBtn);
+
 
   // BOUTON PAUSE / REPRENDRE (TON CODE ACTUEL, ON LE GARDE TEL QUEL)
   const pauseBtn = createActionButton(
@@ -3488,6 +4103,10 @@ function startAutoRefresh(api) {
 // Initialisation du plugin (format E-UC commercial)
 // -------------------------------------------------------------------
 
+// -------------------------------------------------------------------
+// Initialisation du plugin (format E-UC commercial)
+// -------------------------------------------------------------------
+
 (async () => {
   const app = new App();
 
@@ -3513,13 +4132,17 @@ function startAutoRefresh(api) {
     state.baseUrl = baseUrl;
     state.token = token;
 
+    // 🔹 on garde aussi l’app et le contexte sous la main
+    state.app = app;
+    state.context = context;
+
     // Premier chargement
     await loadData(api);
 
-    // Auto-refresh léger en fond (toutes les 15s, skip si WebSocket OK)
+    // Auto-refresh léger
     startAutoRefresh(api);
 
-    // WebSocket pour les mises à jour temps réel
+    // WebSocket temps réel
     state.websocket = connectRealtime(baseUrl, token, api);
   } catch (err) {
     console.error('[Superviseur] Erreur init :', err);
@@ -3530,3 +4153,4 @@ function startAutoRefresh(api) {
     renderEmptyState('Erreur lors du chargement des agents.');
   }
 })();
+

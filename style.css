@@ -1102,3 +1102,84 @@ body.is-dark .transfer-control .btn--secondary {
   background-color: #a24ef0;
   color: #fff;
 }
+
+.supervisor-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+}
+
+.supervisor-modal {
+  background: var(--color-surface, #1f2933);
+  color: var(--color-text, #f9fafb);
+  border-radius: 8px;
+  min-width: 380px;
+  max-width: 640px;
+  max-height: 70vh;
+  box-shadow: 0 14px 40px rgba(0,0,0,0.35);
+  display: flex;
+  flex-direction: column;
+}
+
+.supervisor-modal__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+}
+
+.supervisor-modal__title {
+  font-size: 15px;
+  margin: 0;
+}
+
+.supervisor-modal__close {
+  background: transparent;
+  border: none;
+  color: inherit;
+  font-size: 18px;
+  cursor: pointer;
+}
+
+.supervisor-modal__content {
+  padding: 10px 14px 14px;
+  overflow-y: auto;
+  font-size: 13px;
+}
+
+.supervisor-modal-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.supervisor-modal-list li {
+  padding: 4px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
+}
+
+.supervisor-modal-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.supervisor-modal-table th,
+.supervisor-modal-table td {
+  padding: 4px 6px;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+.supervisor-modal-table th {
+  text-align: left;
+  font-weight: 600;
+}
+.supervisor-modal-table tbody tr:nth-child(even) {
+  background-color: rgba(255,255,255,0.02);
+}
