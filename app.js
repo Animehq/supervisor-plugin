@@ -172,15 +172,34 @@ function createActionButton(label, variant = 'secondary') {
 }
 
 function setLoginButtonStyle(btn, isLogged) {
+  // Nettoyage de base
   btn.classList.remove('btn--primary', 'btn--danger');
   btn.classList.add('btn', 'btn--sm');
 
-  if (isLogged) {
+  // On ne touche jamais aux boutons login dans "Hors call center"
+  if (btn.closest('.queue-card--parking')) {
+    return;
+  }
+
+  // 🔒 Sécurisation : si isLogged est null/undefined,
+  // on déduit l'état à partir du texte du bouton (Login / Logout)
+  let effectiveLogged;
+  if (typeof isLogged === 'boolean') {
+    effectiveLogged = isLogged;
+  } else {
+    const label = (btn.textContent || '').trim().toLowerCase();
+    effectiveLogged = (label === 'logout'); // Logout => connecté
+  }
+
+  if (effectiveLogged) {
+    // Agent connecté => bouton rouge (Logout)
     btn.classList.add('btn--danger');
   } else {
+    // Agent déconnecté => bouton bleu (Login)
     btn.classList.add('btn--primary');
   }
 }
+
 
 // -------------------------------------------------------------------
 // Client API Wazo générique (contexte E-UC commercial)
@@ -1240,10 +1259,16 @@ function syncAgentDom(agent) {
       pauseBtn.classList.toggle('btn--pause-disabled', !agent.logged);
     }
 
-    if (loginBtn) {
-      loginBtn.textContent = agent.logged ? 'Logout' : 'Login';
-      setLoginButtonStyle(loginBtn, agent.logged);
-    }
+if (loginBtn) {
+
+  // ⛔ Si Hors Call Center → ne touche JAMAIS au style du bouton Login
+  const card = loginBtn.closest('.queue-card');
+  const isParking = card && card.classList.contains('queue-card--parking');
+  if (!isParking) {
+    loginBtn.textContent = agent.logged ? 'Logout' : 'Login';
+    setLoginButtonStyle(loginBtn, agent.logged);
+  }
+}
 
     const supervisionButtons = row.querySelectorAll('.btn-supervision');
     supervisionButtons.forEach((btn) => {
@@ -1769,6 +1794,79 @@ function syncAllDndButtonsForUser(userUuid, dndEnabled) {
   });
 }
 
+function refreshParkingStatusForUser(userUuid) {
+  if (!userUuid || !containerEl) return;
+
+  const sessionsMap     = state.userSessions     || new Map();
+  const dndMap          = state.userDnd          || new Map();
+  const availabilityMap = state.userAvailability || new Map();
+  const callsByUser     = state.callsByUser      || new Map();
+
+  const rows = containerEl.querySelectorAll(
+    `tr[data-user-uuid="${userUuid}"]`
+  );
+
+  rows.forEach((row) => {
+    const card = row.closest('.queue-card');
+    // On ne met à jour le statut que pour "Hors call center"
+    if (!card || !card.classList.contains('queue-card--parking')) return;
+
+    const pill = row.querySelector('.col-status .pill');
+    if (!pill) return;
+
+    const hasSession  = sessionsMap.get(userUuid) === true;
+    const dndEnabled  = dndMap.get(userUuid) === true;
+    const hasPresence = availabilityMap.has(userUuid);
+    const hasCall     = callsByUser.has(userUuid);
+
+    let info;
+    if (!hasSession) {
+      info = { text: 'Non connecté', css: 'pill--offline' };
+    } else if (dndEnabled) {
+      info = { text: 'Ne pas déranger', css: 'pill--dnd' };
+    } else if (hasCall) {
+      info = { text: 'En appel', css: 'pill--oncall' };
+    } else if (hasPresence) {
+      info = getAvailabilityPill(availabilityMap.get(userUuid));
+    } else {
+      info = { text: 'Disponible', css: 'pill--available' };
+    }
+
+    pill.textContent = info.text;
+    pill.className = 'pill ' + info.css;
+  });
+}
+
+function refreshLoginButtonForRow(row) {
+  if (!row || !containerEl) return;
+
+  const loginBtn = row.querySelector('.agent-login-btn');
+  if (!loginBtn) return;
+
+  const agentId = row.dataset.agentId;
+  const userUuid = row.dataset.userUuid;
+
+  let logged = true; // par défaut
+
+  if (agentId != null) {
+    const ag = findAgentInStateById(agentId);
+    if (ag) logged = !!ag.logged;
+  } else if (userUuid) {
+    // fallback : chercher dans toutes les groups
+    if (state.groups) {
+      for (const agents of state.groups.values()) {
+        const found = agents.find((a) => a.userUuid === userUuid);
+        if (found) {
+          logged = !!found.logged;
+          break;
+        }
+      }
+    }
+  }
+
+  loginBtn.textContent = logged ? 'Logout' : 'Login';
+  setLoginButtonStyle(loginBtn, logged);
+}
 
 
 function buildDndToggleCell(agent, api) {
@@ -1777,17 +1875,13 @@ function buildDndToggleCell(agent, api) {
 
   const btn = createActionButton('', 'primary');
 
-const getUserUuidFromRow = () => {
-  const row = btn.closest('tr');
-
-  if (row && row.dataset.userUuid) {
-    return row.dataset.userUuid;
-  }
-
-  // Cas où le bouton n'est pas encore dans un <tr>
-  return agent.userUuid || null;
-};
-
+  const getUserUuidFromRow = () => {
+    const row = btn.closest('tr');
+    if (row && row.dataset.userUuid) {
+      return row.dataset.userUuid;
+    }
+    return agent.userUuid || null;
+  };
 
   let currentUuid = getUserUuidFromRow();
   if (!currentUuid) {
@@ -1803,12 +1897,10 @@ const getUserUuidFromRow = () => {
   const syncDndUi = () => {
     btn.classList.remove('btn--primary', 'btn--danger');
     if (dndEnabled) {
-      // DND actif -> OFF rouge
-      btn.textContent = 'OFF';
+      btn.textContent = 'OFF';       // DND actif
       btn.classList.add('btn--danger');
     } else {
-      // DND inactif -> ON vert
-      btn.textContent = 'ON';
+      btn.textContent = 'ON';        // DND inactif
       btn.classList.add('btn--primary');
     }
   };
@@ -1816,93 +1908,96 @@ const getUserUuidFromRow = () => {
   syncDndUi();
 
   btn.addEventListener('click', async () => {
-  const userUuid = getUserUuidFromRow();
-  if (!userUuid) {
-    console.warn('[Superviseur] Pas de userUuid pour DND', agent);
-    return;
-  }
+    const userUuid = getUserUuidFromRow();
+    if (!userUuid) {
+      console.warn('[Superviseur] Pas de userUuid pour DND', agent);
+      return;
+    }
 
     const targetState = !dndEnabled;
 
-  try {
-    setStatus(
-      `${targetState ? 'Activation' : 'Désactivation'} du DND pour ${agent.name}…`,
-      'info'
-    );
+    try {
+      setStatus(
+        `${targetState ? 'Activation' : 'Désactivation'} du DND pour ${agent.name}…`,
+        'info'
+      );
 
-    await api(
-      `/api/confd/1.1/users/${encodeURIComponent(userUuid)}/services/dnd`,
-      {
-        method: 'PUT',
-        body: { enabled: targetState },
-      }
-    );
-
-    if (!state.userDnd) state.userDnd = new Map();
-    state.userDnd.set(userUuid, targetState);
-
-    dndEnabled = targetState;
-    syncDndUi();
-
-    // 🔁 met à jour tous les boutons NPD de ce user
-    syncAllDndButtonsForUser(userUuid, targetState);
-
-    // 🔄 met à jour uniquement le statut visuel de la ligne courante
-    const row = btn.closest('tr');
-    if (row) {
-      const statusTd = row.querySelector('.col-status');
-      let statusInfo;
-      const card = row.closest('.queue-card');
-      const isParkingRow =
-        card && card.classList.contains('queue-card--parking');
-
-      if (isParkingRow && userUuid) {
-        const sessionsMap     = state.userSessions     || new Map();
-        const dndMap          = state.userDnd          || new Map();
-        const availabilityMap = state.userAvailability || new Map();
-        const callsByUser     = state.callsByUser      || new Map();
-
-        const hasSession  = sessionsMap.get(userUuid) === true;
-        const dndEnabled2 = dndMap.get(userUuid) === true;
-        const hasPresence = availabilityMap.has(userUuid);
-        const hasCall     = callsByUser.has(userUuid);
-
-        if (!hasSession) {
-          statusInfo = { text: 'Non connecté', css: 'pill--offline' };
-        } else if (dndEnabled2) {
-          statusInfo = { text: 'Ne pas déranger', css: 'pill--dnd' };
-        } else if (hasCall) {
-          statusInfo = { text: 'En appel', css: 'pill--oncall' };
-        } else if (hasPresence) {
-          const raw = availabilityMap.get(userUuid);
-          statusInfo = getAvailabilityPill(raw);
-        } else {
-          statusInfo = { text: 'Disponible', css: 'pill--available' };
+      await api(
+        `/api/confd/1.1/users/${encodeURIComponent(userUuid)}/services/dnd`,
+        {
+          method: 'PUT',
+          body: { enabled: targetState },
         }
-      } else {
-        // File ACD classique → on garde la logique d'origine
-        statusInfo = getStatusInfo(agent);
+      );
+
+      if (!state.userDnd) state.userDnd = new Map();
+      state.userDnd.set(userUuid, targetState);
+
+      dndEnabled = targetState;
+      syncDndUi();
+
+      // 🔁 met à jour tous les boutons NPD de ce user
+      syncAllDndButtonsForUser(userUuid, targetState);
+
+      // 🔄 met à jour seulement la pastille de statut sur la ligne courante
+      const row = btn.closest('tr');
+      if (row) {
+        const statusTd = row.querySelector('.col-status');
+        let statusInfo;
+        const card = row.closest('.queue-card');
+        const isParkingRow =
+          card && card.classList.contains('queue-card--parking');
+
+        if (isParkingRow && userUuid) {
+          const sessionsMap     = state.userSessions     || new Map();
+          const dndMap          = state.userDnd          || new Map();
+          const availabilityMap = state.userAvailability || new Map();
+          const callsByUser     = state.callsByUser      || new Map();
+
+          const hasSession  = sessionsMap.get(userUuid) === true;
+          const dndEnabled2 = dndMap.get(userUuid) === true;
+          const hasPresence = availabilityMap.has(userUuid);
+          const hasCall     = callsByUser.has(userUuid);
+
+          if (!hasSession) {
+            statusInfo = { text: 'Non connecté', css: 'pill--offline' };
+          } else if (dndEnabled2) {
+            statusInfo = { text: 'Ne pas déranger', css: 'pill--dnd' };
+          } else if (hasCall) {
+            statusInfo = { text: 'En appel', css: 'pill--oncall' };
+          } else if (hasPresence) {
+            const raw = availabilityMap.get(userUuid);
+            statusInfo = getAvailabilityPill(raw);
+          } else {
+            statusInfo = { text: 'Disponible', css: 'pill--available' };
+          }
+        } else {
+          // File ACD classique → on garde la logique d'origine
+          statusInfo = getStatusInfo(agent);
+        }
+
+        if (statusTd && statusInfo) {
+          statusTd.innerHTML =
+            `<span class="pill ${statusInfo.css}">${statusInfo.text}</span>`;
+        }
+
+        // 🧷 TRUC IMPORTANT :
+        // On ré-applique **explicitement** l'état du bouton Login
+        // depuis le state, pour être sûr qu'il reste cohérent.
+        refreshLoginButtonForRow(row);
       }
 
-      if (statusTd && statusInfo) {
-        statusTd.innerHTML =
-          `<span class="pill ${statusInfo.css}">${statusInfo.text}</span>`;
-      }
+      setStatus('DND mis à jour.', 'success');
+    } catch (err) {
+      console.error('[Superviseur] Erreur DND', err);
+      setStatus('Erreur lors de la mise à jour du DND.', 'error');
     }
-
-    setStatus('DND mis à jour.', 'success');
-
-  } catch (err) {
-    console.error('[Superviseur] Erreur DND', err);
-    setStatus('Erreur lors de la mise à jour du DND.', 'error');
-  }
-
-});
-
+  });
 
   td.appendChild(btn);
   return td;
 }
+
 
 
 
