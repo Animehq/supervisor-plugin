@@ -2811,7 +2811,7 @@ if (isParking) {
   thead.innerHTML = `
     <tr>
       <th>NOM</th>
-      <th>EXTENSION</th>
+      <th class="col-ext">EXTENSION</th>
       <th>DISPONIBILITÉ</th>
       <th>TRANSFERT</th>
       <th>NPD</th>
@@ -2822,7 +2822,7 @@ if (isParking) {
   thead.innerHTML = `
     <tr>
       <th>NOM</th>
-      <th>EXTENSION</th>
+      <th class="col-ext">EXTENSION</th>
       <th>ÉTAT</th>
       <th>APPEL EN COURS</th>
       <th>SUPERVISION</th>
@@ -2832,6 +2832,7 @@ if (isParking) {
     </tr>
   `;
 }
+
 
 table.appendChild(thead);
 
@@ -2937,37 +2938,53 @@ table.appendChild(thead);
   let actionsCell = null;
 
 
-      if (isParking) {
-        // Hors call center : Nom / Extension / Disponibilité / Transfert / DND
-        tr.innerHTML = `
-          <td>${agent.name}</td>
-          <td>${agent.extension || '—'}</td>
-          <td class="col-status">
-            <span class="pill ${statusInfo.css}">${statusInfo.text}</span>
-          </td>
-          <td class="col-transfer"></td>
-          <td class="col-dnd"></td>
-        `;
-        transferCell = tr.querySelector('.col-transfer');
-      } else {
-        // Files ACD complètes
-        tr.innerHTML = `
-          <td>${agent.name}</td>
-          <td>${agent.extension || '—'}</td>
-          <td class="col-status">
-            <span class="pill ${statusInfo.css}">${statusInfo.text}</span>
-          </td>
-          <td class="col-call">${callCellHtml}</td>
-          <td class="col-supervision"></td>
-          <td class="col-transfer"></td>
-          <td class="col-dnd"></td>
-          <td class="col-actions"></td>
-        `;
+if (isParking) {
+  // Hors call center : Nom / Extension / Disponibilité / Transfert / DND
+  tr.innerHTML = `
+    <td>${agent.name}</td>
+    <td class="col-ext">${agent.extension || '—'}</td>
+    <td class="col-status">
+      <span class="pill ${statusInfo.css}">${statusInfo.text}</span>
+    </td>
+    <td class="col-transfer"></td>
+    <td class="col-dnd"></td>
+  `;
+  transferCell = tr.querySelector('.col-transfer');
+} else {
+  // Files ACD complètes
+  tr.innerHTML = `
+    <td>${agent.name}</td>
+    <td class="col-ext">${agent.extension || '—'}</td>
+    <td class="col-status">
+      <span class="pill ${statusInfo.css}">${statusInfo.text}</span>
+    </td>
+    <td class="col-call">${callCellHtml}</td>
+    <td class="col-supervision"></td>
+    <td class="col-transfer"></td>
+    <td class="col-dnd"></td>
+    <td class="col-actions"></td>
+  `;
 
-        supervisionCell = tr.querySelector('.col-supervision');
-        transferCell = tr.querySelector('.col-transfer');
-        actionsCell = tr.querySelector('.col-actions');
-      }
+  supervisionCell = tr.querySelector('.col-supervision');
+  transferCell = tr.querySelector('.col-transfer');
+  actionsCell = tr.querySelector('.col-actions');
+}
+
+// --- Extension cliquable pour appeler l'agent ---
+const extCell = tr.querySelector('.col-ext');
+
+if (extCell && (agent.extension || agent.number)) {
+  const num = agent.extension || agent.number;
+
+  extCell.textContent = num;           // juste le numéro
+  extCell.classList.add('ext-callable'); // style clickable
+
+  extCell.addEventListener('click', () => {
+    callAgentFromSupervisor(agent, state.api);
+  });
+}
+
+
 
 
 
@@ -3150,7 +3167,6 @@ if (transferCell) {
 
 if (!isParking) {
   // === BOUTONS SUPERVISEUR (NOUVEAUX + SPY conservé) ===
-  const callBtn  = createActionButton('Appeler', 'secondary');
   const spyBtn   = createActionButton('Spy', 'secondary');         // 🔥 KEEP SPY
   const histBtn  = createActionButton('Historique', 'secondary');
   const statsBtn = createActionButton('Stats agent', 'secondary');
@@ -3158,7 +3174,6 @@ const recBtn   = createActionButton('Rec', 'secondary');
   recBtn.dataset.recording = 'off';
 
   const supervisionButtons = [
-    callBtn,
     spyBtn,
     histBtn,
     statsBtn,
@@ -3170,11 +3185,6 @@ const recBtn   = createActionButton('Rec', 'secondary');
     btn.classList.add('btn-supervision');
     btn.disabled = !agent.logged;
   });
-
-  // === Actions ===
-  callBtn.addEventListener('click', () =>
-    callAgentFromSupervisor(agent, api)
-  );
 
   // 🔥 SPY UTILISE TOUJOURS superviseAgentCall('spy')
   spyBtn.addEventListener('click', () =>
@@ -3189,7 +3199,6 @@ const recBtn   = createActionButton('Rec', 'secondary');
 
 
   // Injection dans la cellule supervision
-  supervisionCell.appendChild(callBtn);
   supervisionCell.appendChild(spyBtn);      // 🔥 IMPORTANT — SPY est ici
   supervisionCell.appendChild(histBtn);
   supervisionCell.appendChild(statsBtn);

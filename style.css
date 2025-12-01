@@ -1183,3 +1183,56 @@ body.is-dark .transfer-control .btn--secondary {
 .supervisor-modal-table tbody tr:nth-child(even) {
   background-color: rgba(255,255,255,0.02);
 }
+
+.ext-call-cell .btn-link-ext {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+  text-decoration: underline;
+}
+.ext-call-cell .btn-link-ext {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+  text-decoration: underline;
+}
+
+/* Cellule extension clickable façon Wazo Desktop */
+.ext-callable {
+  cursor: pointer;
+  position: relative;
+  color: #B8C7FF;          /* bleu très léger, discret */
+  font-weight: 500;
+  user-select: none;
+  transition: color 0.15s ease, transform 0.1s ease;
+}
+
+.ext-callable:hover {
+  color: #ffffff;
+  text-decoration: underline;
+}
+
+/* Effet appui (clic) ultra léger */
+.ext-callable:active {
+  transform: scale(0.96);
+}
+
+/* Petit ripple light (Wazo-style) */
+.ext-callable::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: rgba(255,255,255,0.1);
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  border-radius: 4px;
+}
+
+.ext-callable:active::after {
+  opacity: 1;
+}
+
